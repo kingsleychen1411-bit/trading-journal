@@ -692,6 +692,15 @@
 </head>
 <body>
 <div id="appLoader"><div class="loader-bar"></div><div>Loading your journal...</div></div>
+<div id="lockScreenOverlay" style="display:none;position:fixed;inset:0;z-index:9999;background:var(--bg);flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:20px;text-align:center;">
+  <div style="font-size:32px;">🔒</div>
+  <div style="font-size:17px;font-weight:600;color:var(--text);">Tradalytics is locked</div>
+  <div style="font-size:12.5px;color:var(--text-dim);max-width:280px;">Enter your PIN to continue.</div>
+  <input type="password" id="lockScreenPinInput" inputmode="numeric" placeholder="PIN" style="max-width:160px;text-align:center;font-size:16px;letter-spacing:4px;">
+  <div id="lockScreenError" style="font-size:12px;color:var(--red);height:16px;"></div>
+  <button class="btn primary" id="lockScreenUnlockBtn" type="button">Unlock</button>
+  <button class="btn small ghost" id="lockScreenForgotBtn" type="button" style="margin-top:6px;">Forgot PIN?</button>
+</div>
 <button class="mobileMenuBtn" id="mobileMenuBtn">☰</button>
 
 <button class="notif-bell" id="notifBell" title="Notifications">
@@ -1096,13 +1105,29 @@
       </div>
       <div class="field">
         <label>Backup <span class="hint" style="display:inline;">(everything — trades, screenshots, settings, chat history)</span></label>
-        <div style="display:flex;gap:8px;">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
           <button class="btn small" id="btnExportData" type="button">⬇ Export all data</button>
           <button class="btn small" id="btnImportData" type="button">⬆ Import backup</button>
+          <button class="btn small ghost" id="btnExportCsv" type="button">⬇ Export CSV</button>
           <input type="file" id="importDataFile" accept="application/json" style="display:none;">
         </div>
         <div class="hint" id="backupStatusLine">Export regularly — this is your only copy if the browser clears storage.</div>
         <div class="hint" id="lastBackupLine" style="margin-top:2px;"></div>
+        <div class="hint" style="margin-top:2px;">CSV export is spreadsheet-friendly (Excel/Sheets) but leaves out screenshots and chat history — use the full export above for a real backup.</div>
+      </div>
+      <div class="field">
+        <label>Trash <span class="hint" style="display:inline;">(deleted trades, kept 30 days before permanent removal)</span></label>
+        <div id="trashList" class="hint">No trades in trash.</div>
+      </div>
+      <div class="field">
+        <label>App lock <span class="hint" style="display:inline;">(PIN screen when you open the app — a privacy latch, not real encryption)</span></label>
+        <div id="appLockStatusLine" class="hint" style="margin-bottom:6px;">No PIN set.</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+          <input type="password" id="lockPinInput" placeholder="New 4-8 digit PIN" inputmode="numeric" style="max-width:160px;">
+          <button class="btn small" id="btnSetLockPin" type="button">Set PIN</button>
+          <button class="btn small ghost" id="btnRemoveLockPin" type="button" style="display:none;">Remove PIN</button>
+        </div>
+        <div class="hint" style="margin-top:4px;">This only gates the app's screen — anyone with browser developer tools could still bypass it, so don't rely on it for real security. Forgetting the PIN never deletes your data; use "Forgot PIN?" on the lock screen to remove the lock.</div>
       </div>
       <div class="field">
         <label>Anthropic API key <span class="hint" style="display:inline;">(optional — enables AI features outside Claude.ai)</span></label>
@@ -1165,7 +1190,7 @@
   // the shape of the saved journal-data blob; bump it whenever a change to state's structure would
   // break older saved data, and add a step to MIGRATIONS below (keyed by the version being upgraded
   // FROM) so existing users' data is transformed forward instead of silently losing fields.
-  var APP_VERSION='21.0.0';
+  var APP_VERSION='22.0.0';
   var SCHEMA_VERSION=2;
   var MIGRATIONS={
     // 1 -> 2: introduced state.trash (soft-delete/undo for trades) and settings.lastBackupAt
@@ -2958,8 +2983,50 @@
   }
 
   // ---- query parsing: pull a date range + symbol + setup out of free text, filter, then compute ----
+  // ---- local coach: phrasing normalization ----
+  // The coach below is regex pattern-matching against your own computed stats — not a language
+  // model — so it can only answer question *shapes* it has a handler for. This layer buys a lot of
+  // slack around that limit for free: it rewrites common synonyms/phrasings to one canonical form
+  // before any matching happens, so "this morning" / "today's session" / "this trading day" all
+  // collapse to "today", "ticker"/"stock" collapse to "symbol", etc. Add pairs here first when a
+  // real question gets missed — it's usually cheaper than adding a whole new regex branch.
+  var COACH_SYNONYMS=[
+    // time-range phrasings -> the exact words parseQueryFilters already looks for
+    [/\b(this morning|earlier today|today'?s session|so far today|this trading day|today'?s trades?)\b/g,'today'],
+    [/\byesterday'?s session\b/g,'yesterday'],
+    [/\b(this past week|last 7 days|last seven days|past week)\b/g,'this week'],
+    [/\b(past month|last 30 days|last thirty days)\b/g,'this month'],
+    // instrument naming -> "symbol" (parseQueryFilters' own symbol-detection uses the raw text
+    // separately, so normalizing the word around it here is safe)
+    [/\btickers?\b/g,'symbol'],
+    [/\bstocks?\b/g,'symbol'],
+    [/\binstruments?\b/g,'symbol'],
+    // position/trade naming
+    [/\bpositions?\b/g,'trades'],
+    // buy/sell phrasing variants
+    [/\bpurchas(e|ed|ing)\b/g,'bought'],
+    [/\bpicked up\b/g,'bought'],
+    [/\bshorted\b/g,'sold'],
+    [/\boffloaded\b/g,'sold'],
+    // win-rate / pnl / count synonyms
+    [/\b(success rate|winning percentage|how often (do|did) i win)\b/g,'win rate'],
+    [/\b(profit and loss|p and l|p n l)\b/g,'pnl'],
+    [/\bhow many times\b/g,'how many'],
+    [/\bhow much money (have i made|did i make)\b/g,'total pnl'],
+    [/\bnet result\b/g,'total pnl'],
+    [/\bbiggest loser\b/g,'biggest loss'],
+    [/\bbiggest winner\b/g,'biggest win'],
+    [/\bworst day\b/g,'biggest loss'],
+    [/\bbest day\b/g,'biggest win']
+  ];
+  function normalizeQuery(text){
+    var s=' '+text.toLowerCase()+' ';
+    COACH_SYNONYMS.forEach(function(pair){ s=s.replace(pair[0],pair[1]); });
+    return s.replace(/\s+/g,' ').trim();
+  }
+
   function parseQueryFilters(text){
-    var lower=text.toLowerCase();
+    var lower=normalizeQuery(text);
     var all=allTradesFlat();
     var trades=all;
     var rangeLabel='all time';
@@ -3393,8 +3460,41 @@
   }
   // ---- local answer engine: pattern-match the question, answer straight from computed stats, no API needed ----
   function generateLocalAnswer(text,filtered,stats){
-    var lower=text.toLowerCase();
+    var lower=normalizeQuery(text);
     if(!stats.count) return 'No trades found for '+filtered.rangeLabel+'. Nothing to report on yet for that range.';
+
+    // "what did I buy/sell/trade [today|this week|...]" — lists the actual symbols+direction for
+    // whatever range/symbol/strategy parseQueryFilters already narrowed down to.
+    if(/what (did i|have i|symbols? did i|symbols? have i) (buy|bought|sell|sold|trade|traded)|(symbols?|which symbols?) (bought|sold|traded)/.test(lower)){
+      var seen={}, list=[];
+      filtered.trades.forEach(function(t){
+        var key=(t.symbol||'—')+'|'+(t.direction||'');
+        if(seen[key]) return; seen[key]=true;
+        list.push((t.symbol||'—')+' ('+(t.direction==='short'?'short':'long')+')');
+      });
+      return 'In '+filtered.rangeLabel+' you traded: '+list.join(', ')+' — '+stats.count+' trade'+(stats.count!==1?'s':'')+' total.';
+    }
+    if(/longest (win|winning) streak/.test(lower)){
+      var chrono=sortedTrades(), longest=0, cur=0;
+      chrono.forEach(function(t){ if(computeTrade(t).pnl>0){ cur++; longest=Math.max(longest,cur); } else cur=0; });
+      return 'Your longest winning streak on record is '+longest+' trade'+(longest!==1?'s':'')+' in a row.';
+    }
+    if(/longest (los(s|ing)) streak/.test(lower)){
+      var chrono2=sortedTrades(), longest2=0, cur2=0;
+      chrono2.forEach(function(t){ if(computeTrade(t).pnl<0){ cur2++; longest2=Math.max(longest2,cur2); } else cur2=0; });
+      return 'Your longest losing streak on record is '+longest2+' trade'+(longest2!==1?'s':'')+' in a row.';
+    }
+    if(/(average|avg) (trades|position size|size) per day|trades? per day/.test(lower)){
+      var byDay={}; filtered.trades.forEach(function(t){ byDay[t.date]=(byDay[t.date]||0)+1; });
+      var dayKeys=Object.keys(byDay);
+      var avgPerDay=dayKeys.length?(stats.count/dayKeys.length):0;
+      return 'You averaged '+avgPerDay.toFixed(1)+' trades per active trading day in '+filtered.rangeLabel+' ('+dayKeys.length+' day'+(dayKeys.length!==1?'s':'')+' with at least one trade).';
+    }
+    if(/(largest|biggest) position size|largest trade size/.test(lower)){
+      var withSize=filtered.trades.map(function(t){ return {t:t,size:parseFloat(t.positionSize)||0}; }).filter(function(x){return x.size>0;}).sort(function(a,b){return b.size-a.size;});
+      if(!withSize.length) return 'No position sizes logged in '+filtered.rangeLabel+'.';
+      return 'Your largest position size in '+filtered.rangeLabel+' was '+fmtMoney(withSize[0].size).replace('+','')+' on '+withSize[0].t.symbol+' ('+withSize[0].t.date+').';
+    }
 
     if(/last trade|most recent trade|recent trade|latest trade/.test(lower)){
       var sortedFiltered=filtered.trades.slice().sort(function(a,b){
@@ -5327,6 +5427,8 @@
     }
     var verEl=document.getElementById('appVersionLine');
     if(verEl) verEl.textContent='Tradalytics v'+APP_VERSION+' · schema v'+SCHEMA_VERSION;
+    renderTrashList();
+    renderAppLockStatus();
     document.getElementById('settingsWrap').classList.add('show');
   }
   function closeSettings(){document.getElementById('settingsWrap').classList.remove('show');}
@@ -5411,6 +5513,73 @@
     };
     reader.readAsText(file);
   }
+  // ---- CSV export (spreadsheet-friendly subset — no screenshots/chat, use the JSON backup for that) ----
+  function csvEscape(val){
+    var s=(val===null||val===undefined)?'':String(val);
+    if(/[",\n]/.test(s)) s='"'+s.replace(/"/g,'""')+'"';
+    return s;
+  }
+  function exportCSV(){
+    var status=document.getElementById('backupStatusLine');
+    var cols=['date','symbol','direction','assetType','strategy','session','qty','avgEntry','avgExit',
+      'pnl','pnlPct','riskPercent','positionSize','fees','stopPrice','targetPrice','rr','mae','mfe',
+      'confidence','followedStrategy','mistake','tags','entryReasoning','whatHappened','exitReason','feelings','comments'];
+    var rows=[cols.join(',')];
+    var trades=sortedTrades();
+    trades.forEach(function(t){
+      var c=computeTrade(t);
+      var row={
+        date:t.date, symbol:t.symbol||'', direction:t.direction||'', assetType:t.assetType||'',
+        strategy:strategyLabel(t.strategy), session:t.session||'',
+        qty:c.entry.qty||'', avgEntry:c.entry.avg||'', avgExit:c.exit.avg||'',
+        pnl:c.pnl.toFixed(2), pnlPct:c.pnlPct.toFixed(2), riskPercent:t.riskPercent||'',
+        positionSize:t.positionSize||'', fees:t.fees||'', stopPrice:t.stopPrice||'', targetPrice:t.targetPrice||'',
+        rr:c.rr!=null?c.rr.toFixed(2):'', mae:t.mae||'', mfe:t.mfe||'', confidence:t.confidence||'',
+        followedStrategy:t.followedStrategy?'yes':'no', mistake:t.mistake||'', tags:(t.tags||[]).join('; '),
+        entryReasoning:t.entryReasoning||'', whatHappened:t.whatHappened||'', exitReason:t.exitReason||'',
+        feelings:t.feelings||'', comments:t.comments||''
+      };
+      rows.push(cols.map(function(k){ return csvEscape(row[k]); }).join(','));
+    });
+    var csvStr=rows.join('\r\n');
+    var blob=new Blob([csvStr],{type:'text/csv;charset=utf-8;'});
+    var url=URL.createObjectURL(blob);
+    var a=document.createElement('a');
+    a.href=url; a.download='tradalytics-trades-'+todayStr()+'.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function(){ URL.revokeObjectURL(url); },1000);
+    if(status) status.textContent='✓ Exported '+trades.length+' trades to CSV.';
+  }
+  document.getElementById('btnExportCsv').addEventListener('click',exportCSV);
+
+  // ---- browsable trash (Settings) — the Undo toast covers the in-the-moment case; this covers
+  // "I deleted something days ago and want it back", up to TRASH_RETENTION_DAYS ----
+  function renderTrashList(){
+    var el=document.getElementById('trashList');
+    if(!el) return;
+    var trash=(state.trash||[]).slice().sort(function(a,b){ return b.deletedAt.localeCompare(a.deletedAt); });
+    if(!trash.length){ el.innerHTML='No trades in trash.'; return; }
+    el.innerHTML=trash.map(function(item,idx){
+      var t=item.trade;
+      var daysLeft=Math.max(0, TRASH_RETENTION_DAYS - Math.floor((Date.now()-new Date(item.deletedAt).getTime())/86400000));
+      return '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border-soft);gap:8px;">'+
+        '<span>'+esc(t.symbol||'—')+' · '+esc(item.date)+' <span style="color:var(--text-faint);">(purges in '+daysLeft+'d)</span></span>'+
+        '<button class="btn small ghost" data-trash-idx="'+idx+'" type="button">Restore</button></div>';
+    }).join('');
+    el.querySelectorAll('[data-trash-idx]').forEach(function(btn){
+      btn.addEventListener('click',function(){
+        var idx=parseInt(btn.getAttribute('data-trash-idx'),10);
+        var sorted=(state.trash||[]).slice().sort(function(a,b){ return b.deletedAt.localeCompare(a.deletedAt); });
+        var item=sorted[idx];
+        if(!item) return;
+        state.trash=(state.trash||[]).filter(function(x){ return x!==item; });
+        state.days[item.date]=state.days[item.date]||[];
+        state.days[item.date].push(item.trade);
+        saveData().then(function(){ renderAll(); renderTrashList(); });
+      });
+    });
+  }
+
   document.getElementById('btnExportData').addEventListener('click',exportAllData);
   document.getElementById('btnImportData').addEventListener('click',function(){ document.getElementById('importDataFile').click(); });
   document.getElementById('importDataFile').addEventListener('change',function(e){
@@ -5693,6 +5862,99 @@
     stack.appendChild(el);
   }
 
+  // ---- app lock (PIN screen) ----
+  // Deliberately framed as a privacy latch, not real security: the check runs in the same
+  // client-side JS as everything else, so anyone with devtools access to this page could bypass
+  // it. It stops casual glance/shoulder-surf access on a shared device, nothing stronger. The PIN
+  // itself is never stored — only a SHA-256 hash of it — so "forgot PIN" has no way to recover the
+  // old PIN; it can only remove the lock (never touches trade data).
+  function hasAppLock(){ return !!(state.settings && state.settings.appLockPinHash); }
+  function hashPin(pin){
+    try{
+      var enc=new TextEncoder().encode('tradalytics-lock:'+pin);
+      return crypto.subtle.digest('SHA-256',enc).then(function(buf){
+        return btoa(String.fromCharCode.apply(null,new Uint8Array(buf)));
+      });
+    }catch(e){
+      // very old browser without SubtleCrypto — keep the feature working, just weaker
+      var h=0; for(var i=0;i<pin.length;i++){ h=((h<<5)-h+pin.charCodeAt(i))|0; }
+      return Promise.resolve('fallback:'+h);
+    }
+  }
+  var lockUnlockedThisSession=false, lockIdleTimer=null;
+  var LOCK_IDLE_MS=10*60*1000; // re-lock after 10 minutes of no interaction
+  function armIdleLockTimer(){
+    if(!hasAppLock()) return;
+    clearTimeout(lockIdleTimer);
+    lockIdleTimer=setTimeout(function(){ lockUnlockedThisSession=false; showLockScreen(); },LOCK_IDLE_MS);
+  }
+  ['mousemove','keydown','click','touchstart'].forEach(function(evt){
+    document.addEventListener(evt,function(){ if(lockUnlockedThisSession) armIdleLockTimer(); },{passive:true});
+  });
+  function showLockScreen(){
+    var el=document.getElementById('lockScreenOverlay');
+    if(!el) return;
+    el.style.display='flex';
+    document.getElementById('lockScreenPinInput').value='';
+    document.getElementById('lockScreenError').textContent='';
+    setTimeout(function(){ var i=document.getElementById('lockScreenPinInput'); if(i) i.focus(); },50);
+  }
+  function hideLockScreen(){
+    var el=document.getElementById('lockScreenOverlay');
+    if(el) el.style.display='none';
+    lockUnlockedThisSession=true;
+    armIdleLockTimer();
+  }
+  function attemptUnlock(){
+    var input=document.getElementById('lockScreenPinInput');
+    var pin=(input.value||'').trim();
+    if(!pin) return;
+    hashPin(pin).then(function(h){
+      if(h===state.settings.appLockPinHash){ hideLockScreen(); }
+      else{
+        document.getElementById('lockScreenError').textContent='Incorrect PIN.';
+        input.value=''; input.focus();
+      }
+    });
+  }
+  document.getElementById('lockScreenUnlockBtn').addEventListener('click',attemptUnlock);
+  document.getElementById('lockScreenPinInput').addEventListener('keydown',function(e){ if(e.key==='Enter') attemptUnlock(); });
+  document.getElementById('lockScreenForgotBtn').addEventListener('click',function(){
+    customConfirm('Remove the PIN lock? This does NOT delete any trades or data — it only removes the lock screen.').then(function(ok){
+      if(!ok) return;
+      state.settings.appLockPinHash=null;
+      saveData().then(function(){ hideLockScreen(); renderAppLockStatus(); });
+    });
+  });
+  function renderAppLockStatus(){
+    var line=document.getElementById('appLockStatusLine');
+    var removeBtn=document.getElementById('btnRemoveLockPin');
+    if(!line) return;
+    if(hasAppLock()){
+      line.textContent='✓ PIN lock is on — you\'ll be asked for it on open and after 10 idle minutes.';
+      if(removeBtn) removeBtn.style.display='inline-flex';
+    } else {
+      line.textContent='No PIN set.';
+      if(removeBtn) removeBtn.style.display='none';
+    }
+  }
+  document.getElementById('btnSetLockPin').addEventListener('click',function(){
+    var pin=document.getElementById('lockPinInput').value.trim();
+    if(!/^\d{4,8}$/.test(pin)){ alert('PIN must be 4-8 digits.'); return; }
+    hashPin(pin).then(function(h){
+      state.settings.appLockPinHash=h;
+      document.getElementById('lockPinInput').value='';
+      saveData().then(function(){ renderAppLockStatus(); lockUnlockedThisSession=true; armIdleLockTimer(); });
+    });
+  });
+  document.getElementById('btnRemoveLockPin').addEventListener('click',function(){
+    customConfirm('Remove the PIN lock?').then(function(ok){
+      if(!ok) return;
+      state.settings.appLockPinHash=null;
+      saveData().then(renderAppLockStatus);
+    });
+  });
+
   // ============ INIT ============
   function setupPwaManifest(){
     try{
@@ -5785,6 +6047,7 @@
     purgeOldTrash();
     checkBackupNag();
     refreshStorageQuoteLine();
+    if(hasAppLock()) showLockScreen(); else armIdleLockTimer();
   });
 })();
 </script>
