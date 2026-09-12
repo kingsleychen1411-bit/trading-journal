@@ -415,6 +415,9 @@
   .rtab:hover{color:var(--text);}
   .rtab.active{color:var(--accent);border-bottom-color:var(--accent);}
   .report-controls{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:10px;}
+  .btab{background:none;border:none;color:var(--text-dim);font-size:13px;font-weight:600;padding:10px 14px;border-bottom:2px solid transparent;margin-bottom:-1px;cursor:pointer;}
+  .btab:hover{color:var(--text);}
+  .btab.active{color:var(--accent);border-bottom-color:var(--accent);}
   .bar-chart{display:flex;align-items:flex-end;gap:3px;height:180px;padding-top:10px;}
   .bar-chart .bar{flex:1;border-radius:3px 3px 0 0;min-width:2px;position:relative;}
   .bar-chart .bar:hover{filter:brightness(1.3);}
@@ -755,6 +758,10 @@
     <div class="nav-label">Discipline</div>
     <button class="nav-item" data-page="rules"><span class="ic">📏</span>Rules</button>
   </div>
+  <div class="nav-group">
+    <div class="nav-label">Research</div>
+    <button class="nav-item" data-page="backtester"><span class="ic">🧪</span>Backtester</button>
+  </div>
   <div class="sidebar-foot">
     <button class="nav-item" id="btnImportSide"><span class="ic">⇩</span>Import from IBKR</button>
     <button class="nav-item" id="btnSettingsSide"><span class="ic">⚙</span>Account settings</button>
@@ -935,6 +942,35 @@
         <div class="panel"><div class="panel-title">P&amp;L by tag</div><div id="reportTagPnl"></div></div>
         <div class="panel"><div class="panel-title">Mistake leaderboard</div><div id="reportMistakes"></div></div>
       </div>
+    </div>
+  </div>
+
+  <!-- BACKTESTER -->
+  <div class="page" id="page-backtester">
+    <div class="page-head">
+      <div><h2>Strategy Backtester</h2><p>Import 1-minute OHLCV data and test rule-based entry/exit strategies against it — fully offline, everything stays on this device.</p></div>
+    </div>
+    <div class="report-tabs" id="backtesterTabs">
+      <button class="btab active" data-btab="datasets">Datasets</button>
+      <button class="btab" data-btab="strategy">Strategy</button>
+      <button class="btab" data-btab="results">Results</button>
+      <button class="btab" data-btab="compare">Compare</button>
+    </div>
+
+    <div id="btab-datasets" class="btab-panel">
+      <div id="backtestDatasetsBody"></div>
+    </div>
+
+    <div id="btab-strategy" class="btab-panel" style="display:none;">
+      <div id="backtestStrategyBody"></div>
+    </div>
+
+    <div id="btab-results" class="btab-panel" style="display:none;">
+      <div id="backtestResultsBody"></div>
+    </div>
+
+    <div id="btab-compare" class="btab-panel" style="display:none;">
+      <div id="backtestCompareBody"></div>
     </div>
   </div>
 
@@ -1130,6 +1166,27 @@
         <div class="hint" style="margin-top:4px;">This only gates the app's screen — anyone with browser developer tools could still bypass it, so don't rely on it for real security. Forgetting the PIN never deletes your data; use "Forgot PIN?" on the lock screen to remove the lock.</div>
       </div>
       <div class="field">
+        <label>Cloud sync <span class="hint" style="display:inline;">(trades &amp; notes across your devices — free, via your own account)</span></label>
+        <div id="cloudSyncStatus" class="hint" style="margin-bottom:6px;">Checking...</div>
+        <div id="cloudSyncSignedOut" style="display:none;">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <input type="email" id="cloudSyncEmail" placeholder="Email" autocomplete="username" style="flex:1;min-width:140px;">
+            <input type="password" id="cloudSyncPassword" placeholder="Password (6+ characters)" autocomplete="current-password" style="flex:1;min-width:140px;">
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;">
+            <button class="btn small" id="btnCloudSignIn" type="button">Sign in</button>
+            <button class="btn small ghost" id="btnCloudSignUp" type="button">Create account</button>
+          </div>
+          <div class="hint" id="cloudSyncError" style="margin-top:4px;color:var(--red);"></div>
+        </div>
+        <div id="cloudSyncSignedIn" style="display:none;">
+          <div class="hint">Signed in as <b id="cloudSyncEmailLine"></b></div>
+          <div class="hint" id="cloudSyncActivity" style="margin-top:2px;"></div>
+          <button class="btn small ghost" id="btnCloudSignOut" type="button" style="margin-top:6px;">Sign out</button>
+        </div>
+        <div class="hint" style="margin-top:4px;">Only trade data and notes sync — screenshots stay local to each device (use the backup export/import above to move those). Sign in with the same account on your phone and laptop to keep both up to date.</div>
+      </div>
+      <div class="field">
         <label>Anthropic API key <span class="hint" style="display:inline;">(optional — enables AI features outside Claude.ai)</span></label>
         <input type="password" id="apiKeyInput" placeholder="sk-ant-...">
         <div class="hint" id="apiKeyStatusLine"></div>
@@ -1178,6 +1235,65 @@
   </div>
 </div>
 
+<script type="module">
+// Cloud sync (optional, zero-cost): backs onto a free Firebase project (Spark plan — no card
+// required, generous free daily quota). Loaded as its own ES module because Firebase's SDK is
+// module-only; it publishes a small window.TradSync API for the main script below to call.
+// If this fails to load (offline, network blocked, ad-blocker) the app must keep working exactly
+// as before with zero cloud dependency — everything here is wrapped so a failure here never
+// breaks local use.
+try{
+  const { initializeApp } = await import("https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js");
+  const { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, setPersistence, browserLocalPersistence } = await import("https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js");
+  const { getFirestore, doc, setDoc, collection, getDocs } = await import("https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js");
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyBPQMx3iDuxWkmYhW44wf2D29sv3RI03o8",
+    authDomain: "tradalytics-f6b37.firebaseapp.com",
+    projectId: "tradalytics-f6b37",
+    storageBucket: "tradalytics-f6b37.firebasestorage.app",
+    messagingSenderId: "568537041826",
+    appId: "1:568537041826:web:2eb44094473b8b78cd80fb"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = getFirestore(app);
+  await setPersistence(auth, browserLocalPersistence);
+
+  window.TradSync = {
+    ready: true,
+    user: undefined, // undefined = not resolved yet; null = signed out; object = signed in
+    _cbs: [],
+    onAuthChange: function(cb){ this._cbs.push(cb); if(this.user!==undefined) cb(this.user); },
+    signUp: function(email, password){ return createUserWithEmailAndPassword(auth, email, password); },
+    signIn: function(email, password){ return signInWithEmailAndPassword(auth, email, password); },
+    signOutUser: function(){ return signOut(auth); },
+    pushDay: function(dateKey, trades, updatedAt){
+      if(!auth.currentUser) return Promise.reject(new Error('not signed in'));
+      const ref = doc(db, 'journals', auth.currentUser.uid, 'days', dateKey);
+      return setDoc(ref, { trades: trades, updatedAt: updatedAt });
+    },
+    pullAllDays: function(){
+      if(!auth.currentUser) return Promise.resolve([]);
+      const colRef = collection(db, 'journals', auth.currentUser.uid, 'days');
+      return getDocs(colRef).then(function(snap){
+        const out = [];
+        snap.forEach(function(d){ out.push({ dateKey: d.id, data: d.data() }); });
+        return out;
+      });
+    }
+  };
+
+  onAuthStateChanged(auth, function(user){
+    window.TradSync.user = user || null;
+    window.TradSync._cbs.forEach(function(cb){ cb(window.TradSync.user); });
+  });
+}catch(e){
+  console.warn('Cloud sync unavailable (app works fully offline without it):', e);
+  window.TradSync = { ready:false, user:null, onAuthChange:function(cb){ cb(null); } };
+}
+</script>
 <script>
 (function(){
   "use strict";
@@ -1190,8 +1306,8 @@
   // the shape of the saved journal-data blob; bump it whenever a change to state's structure would
   // break older saved data, and add a step to MIGRATIONS below (keyed by the version being upgraded
   // FROM) so existing users' data is transformed forward instead of silently losing fields.
-  var APP_VERSION='22.0.0';
-  var SCHEMA_VERSION=2;
+  var APP_VERSION='23.2.0';
+  var SCHEMA_VERSION=5;
   var MIGRATIONS={
     // 1 -> 2: introduced state.trash (soft-delete/undo for trades) and settings.lastBackupAt
     // (backup-reminder tracking). Neither existed before, so upgrading just means defaulting them.
@@ -1199,6 +1315,31 @@
       s.trash=s.trash||[];
       s.settings=s.settings||{};
       if(s.settings.lastBackupAt===undefined) s.settings.lastBackupAt=null;
+      return s;
+    },
+    // 2 -> 3: introduced state.dayUpdatedAt (per-day last-modified timestamps, used by the new
+    // cloud sync feature to decide which side of a sync is newer). Didn't exist before, so an
+    // older backup/save just gets an empty map — every day looks "never locally touched" until
+    // it's next edited, which is harmless (a first sign-in will just pull remote as authoritative
+    // for any day not yet touched again locally).
+    2:function(s){
+      s.dayUpdatedAt=s.dayUpdatedAt||{};
+      return s;
+    },
+    // 3 -> 4: introduced state.riskCalc (Position Size & Risk Calculator widget's saved inputs)
+    // and fixed watchlist/dailyNotes never being read back on load (they were already being
+    // saved). None of these break older data — riskCalc defaults to null (the widget fills in
+    // its own defaults on first render) and watchlist/dailyNotes default to empty.
+    3:function(s){
+      if(s.riskCalc===undefined) s.riskCalc=null;
+      s.watchlist=s.watchlist||[];
+      s.dailyNotes=s.dailyNotes||{};
+      return s;
+    },
+    // 4 -> 5: introduced state.backtest (Strategy Backtester: imported 1-min OHLCV datasets +
+    // saved rule sets). Didn't exist before, so it just defaults to empty.
+    4:function(s){
+      s.backtest=s.backtest||{datasets:[],strategies:[],compareSelection:[]};
       return s;
     }
   };
@@ -1215,6 +1356,8 @@
   var state={settings:{accountSize:5000},days:{},layouts:{},activeLayout:null,goals:[],rules:null,
     coachChat:[],coachSessions:null,activeCoachSessionId:null,notifications:[],weeklyInsights:[],lastWeeklyScanDate:null,lastDailyReviewDate:null,milestoneUnlocks:{},
     trash:[],
+    dayUpdatedAt:{},
+    backtest:{datasets:[],strategies:[],compareSelection:[]},
     loaded:false};
   var view={month:new Date(2026,6,1),miniMonth:new Date(2026,6,1),selectedDate:null,editingId:null,editingDate:null,csvRows:null};
   var currentTrade=null;
@@ -1544,6 +1687,14 @@
           state.milestoneUnlocks=p.milestoneUnlocks||{};
           state.importedFingerprints=p.importedFingerprints||[];
           state.trash=p.trash||[];
+          state.dayUpdatedAt=p.dayUpdatedAt||{};
+          // watchlist/dailyNotes were being saved (below in saveData) but never read back here —
+          // fixed alongside the risk calculator work since it's the same "widget state round-trip"
+          // path; previously either would silently revert to empty on every reload.
+          state.watchlist=p.watchlist||[];
+          state.dailyNotes=p.dailyNotes||{};
+          state.riskCalc=p.riskCalc||null;
+          state.backtest=p.backtest||{datasets:[],strategies:[],compareSelection:[]};
           var loadedFrom=p.schemaVersion||1;
           if(loadedFrom<SCHEMA_VERSION) state=migrateData(state,loadedFrom);
         }catch(e){ console.error('journal data was corrupt, starting fresh for missing parts', e); }
@@ -1574,7 +1725,10 @@
       milestoneUnlocks:state.milestoneUnlocks,
       watchlist:state.watchlist, dailyNotes:state.dailyNotes,
       importedFingerprints:state.importedFingerprints||[],
-      trash:state.trash||[]
+      trash:state.trash||[],
+      dayUpdatedAt:state.dayUpdatedAt||{},
+      riskCalc:state.riskCalc||null,
+      backtest:state.backtest||{datasets:[],strategies:[],compareSelection:[]}
     }),false).then(function(res){
       savePending=false;
       hideConnBanner();
@@ -1645,6 +1799,7 @@
     },'milestones');
     safeRun(renderRulesTable,'rules');
     safeRun(renderRulesHistory,'rules history');
+    safeRun(renderBacktester,'backtester');
   }
 
   // ============ WIDGET REGISTRY ============
@@ -1680,7 +1835,8 @@
     asset_allocation:{icon:'🥧',label:'Asset Allocation',cat:'Setups & Tags',span:6,desc:'Stock vs option trade mix.',render:renderW_assetAllocation},
     avg_hold:{icon:'⏳',label:'Average Hold Time',cat:'Performance',span:6,desc:'How long you typically stay in a trade.',render:renderW_avgHold},
     watchlist:{icon:'👁️',label:'Watchlist',cat:'Trades',span:6,desc:'Symbols you\'re keeping an eye on.',render:renderW_watchlist},
-    daily_notes:{icon:'🗒️',label:'Daily Notes',cat:'Psychology',span:12,desc:'Freeform notes not tied to a specific trade.',render:renderW_dailyNotes}
+    daily_notes:{icon:'🗒️',label:'Daily Notes',cat:'Psychology',span:12,desc:'Freeform notes not tied to a specific trade.',render:renderW_dailyNotes},
+    risk_calculator:{icon:'🧮',label:'Position Size & Risk Calculator',cat:'Performance',span:12,desc:'Size a position from your risk %, or back-solve the stop price for a given size.',render:renderW_riskCalc}
   };
   var WIDGET_CATS=['Performance','Calendar & Time','Setups & Tags','Psychology','Trades','Gamification','AI'];
   var DEFAULT_WIDGET_IDS=['kpi','equity_curve','calendar_heatmap','recent_trades'];
@@ -1922,7 +2078,7 @@
     winloss_donut:'chart',best_worst:'trophy',recent_trades:'journal',milestones:'trophy',
     ai_coach:'analyst',trading_dna:'target',strength_map:'shield',edge_decay:'trending',career_timeline:'medal',
     today_pnl:'cash',week_pnl:'chart',session_perf:'hourglass',asset_allocation:'chart',avg_hold:'hourglass',
-    watchlist:'target',daily_notes:'docpencil'
+    watchlist:'target',daily_notes:'docpencil',risk_calculator:'gauge'
   };
   function renderWpGrid(targetWidget){
     var grid=document.getElementById('widgetPickerGrid');
@@ -2172,6 +2328,11 @@
     wireGalleryEvents();
     wireRecentEvents();
     wireAiCoachEvents();
+    // wireWatchlistEvents/wireDailyNotesEvents existed but were never called here — their inputs
+    // and buttons were dead on every render. Fixed alongside the risk calculator widget below.
+    wireWatchlistEvents();
+    wireDailyNotesEvents();
+    wireRiskCalcEvents();
   }
 
   var openWidgetMenu=null;
@@ -4008,6 +4169,839 @@
     });
   }
 
+  // ---- Position Size & Risk Calculator widget ----
+  // Two modes: "size" (given account/risk/entry/stop, solve for how many shares to buy) and
+  // "stop" (given account/risk/entry/a chosen position size, back-solve the stop price that keeps
+  // you at that risk %). Pure client-side arithmetic, nothing persisted except the input fields
+  // themselves (state.riskCalc), so it works fully offline like everything else here.
+  function fmtUsd(n){
+    if(n==null||isNaN(n)) return '—';
+    return '$'+n.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+  }
+  function riskCalcDefaults(){
+    return {
+      mode:'size', direction:'long',
+      accountSize: (state.settings && state.settings.accountSize) ? String(state.settings.accountSize) : '',
+      riskPct:'1', entryPrice:'',
+      stopPrice:'', stopDistance:'', distanceUnit:'percent',
+      sharesOrValue:'', sharesUnit:'shares'
+    };
+  }
+  function riskCalcState(){
+    if(!state.riskCalc) state.riskCalc=riskCalcDefaults();
+    return state.riskCalc;
+  }
+  function computeRiskCalc(rc){
+    var accountSize=parseFloat(rc.accountSize);
+    var riskPct=parseFloat(rc.riskPct);
+    var entryPrice=parseFloat(rc.entryPrice);
+    var direction=rc.direction==='short'?'short':'long';
+    if(!(accountSize>0)) return {error:'Enter an account size.'};
+    if(!(riskPct>0)) return {error:'Enter a risk % per trade.'};
+    if(!(entryPrice>0)) return {error:'Enter an entry price.'};
+    var riskAmount=accountSize*(riskPct/100);
+
+    if(rc.mode==='stop'){
+      var raw=parseFloat(rc.sharesOrValue);
+      if(!(raw>0)) return {error:'Enter a position size to back-solve the stop price.'};
+      var shares = rc.sharesUnit==='dollars' ? (raw/entryPrice) : raw;
+      if(!(shares>0)) return {error:'Position size must be greater than zero.'};
+      var riskPerShare=riskAmount/shares;
+      var stopPrice = direction==='long' ? (entryPrice-riskPerShare) : (entryPrice+riskPerShare);
+      var totalValue=shares*entryPrice;
+      var warnings=[];
+      if(stopPrice<=0) warnings.push('Implied stop price is at or below zero — this position is too large for this risk % (or the risk % is too tight).');
+      if(accountSize>0 && (totalValue/accountSize*100)>100) warnings.push('Position value exceeds your account size — this would require margin/leverage.');
+      return {
+        mode:'stop', riskAmount:riskAmount, riskPerShare:riskPerShare, shares:shares,
+        stopPrice:stopPrice, stopDistanceDollar:riskPerShare,
+        stopDistancePct: entryPrice>0?(riskPerShare/entryPrice*100):0,
+        totalValue:totalValue, pctOfAccount: accountSize>0?(totalValue/accountSize*100):0,
+        warnings:warnings
+      };
+    }
+
+    // mode === 'size'
+    var stopPriceInput=parseFloat(rc.stopPrice);
+    var distanceInput=parseFloat(rc.stopDistance);
+    var stopPriceResolved=null, usedDistance=false;
+    if(stopPriceInput>0){
+      stopPriceResolved=stopPriceInput;
+    } else if(distanceInput>0){
+      usedDistance=true;
+      var distDollar = rc.distanceUnit==='dollar' ? distanceInput : (entryPrice*(distanceInput/100));
+      stopPriceResolved = direction==='long' ? (entryPrice-distDollar) : (entryPrice+distDollar);
+    } else {
+      return {error:'Enter a stop price or a stop distance.'};
+    }
+    var riskPerShare=Math.abs(entryPrice-stopPriceResolved);
+    if(!(riskPerShare>0)) return {error:'Stop price must be different from the entry price.'};
+    var shares=Math.floor(riskAmount/riskPerShare);
+    var totalValue=shares*entryPrice;
+    var warnings2=[];
+    if(shares===0) warnings2.push('Risk amount is smaller than one share\'s worth of risk at this stop distance — position size rounds down to 0 shares.');
+    if(accountSize>0 && (totalValue/accountSize*100)>100) warnings2.push('Position value exceeds your account size — this would require margin/leverage.');
+    return {
+      mode:'size', riskAmount:riskAmount, riskPerShare:riskPerShare, shares:shares,
+      stopPriceResolved:stopPriceResolved, usedDistance:usedDistance,
+      totalValue:totalValue, pctOfAccount:accountSize>0?(totalValue/accountSize*100):0,
+      warnings:warnings2
+    };
+  }
+  function riskCalcOutputsHtml(r){
+    if(r.error) return '<div class="empty-state">'+esc(r.error)+'</div>';
+    var rows;
+    if(r.mode==='stop'){
+      rows='<div class="mini-stat-grid">'+
+        '<div class="mini-stat"><div class="l">RISK AMOUNT</div><div class="v">'+fmtUsd(r.riskAmount)+'</div></div>'+
+        '<div class="mini-stat"><div class="l">RISK / SHARE</div><div class="v">'+fmtUsd(r.riskPerShare)+'</div></div>'+
+        '<div class="mini-stat"><div class="l">IMPLIED STOP PRICE</div><div class="v" style="color:'+(r.stopPrice>0?'var(--text)':'var(--red)')+';">'+fmtUsd(r.stopPrice)+'</div></div>'+
+        '<div class="mini-stat"><div class="l">STOP DISTANCE</div><div class="v">'+fmtUsd(r.stopDistanceDollar)+' ('+r.stopDistancePct.toFixed(2)+'%)</div></div>'+
+        '<div class="mini-stat"><div class="l">POSITION VALUE</div><div class="v">'+fmtUsd(r.totalValue)+'</div></div>'+
+        '<div class="mini-stat"><div class="l">% OF ACCOUNT</div><div class="v" style="color:'+(r.pctOfAccount>100?'var(--red)':'var(--text)')+';">'+r.pctOfAccount.toFixed(1)+'%</div></div>'+
+      '</div>';
+    } else {
+      rows='<div class="mini-stat-grid">'+
+        '<div class="mini-stat"><div class="l">RISK AMOUNT</div><div class="v">'+fmtUsd(r.riskAmount)+'</div></div>'+
+        '<div class="mini-stat"><div class="l">RISK / SHARE</div><div class="v">'+fmtUsd(r.riskPerShare)+'</div></div>'+
+        '<div class="mini-stat"><div class="l">POSITION SIZE</div><div class="v">'+r.shares.toLocaleString()+' shares</div></div>'+
+        '<div class="mini-stat"><div class="l">POSITION VALUE</div><div class="v">'+fmtUsd(r.totalValue)+'</div></div>'+
+        '<div class="mini-stat"><div class="l">% OF ACCOUNT</div><div class="v" style="color:'+(r.pctOfAccount>100?'var(--red)':'var(--text)')+';">'+r.pctOfAccount.toFixed(1)+'%</div></div>'+
+        (r.usedDistance?'<div class="mini-stat"><div class="l">IMPLIED STOP PRICE</div><div class="v">'+fmtUsd(r.stopPriceResolved)+'</div></div>':'')+
+      '</div>';
+    }
+    var warningsHtml=(r.warnings||[]).map(function(w){return '<div class="hint" style="margin-top:6px;color:var(--warn);">⚠ '+esc(w)+'</div>';}).join('');
+    return rows+warningsHtml;
+  }
+  function renderW_riskCalc(){
+    var rc=riskCalcState();
+    var modeSeg=seg('riskCalcModeSeg',[['size','Position size →'],['stop','← Stop price']],rc.mode);
+    var dirSeg=seg('riskCalcDirSeg',[['long','Long'],['short','Short']],rc.direction,'long-short');
+    var html='<div class="hint" style="margin-bottom:10px;">'+(rc.mode==='size'?'Enter your risk and stop to size the position.':'Enter a position size to back-solve the stop price that keeps you at this risk %.')+'</div>';
+    html+=modeSeg;
+    html+='<div class="field-grid" style="margin-top:10px;">'+
+      field('Account size ($)','<input type="number" step="1" id="riskCalcAccountSize" value="'+esc(rc.accountSize)+'">')+
+      field('Risk % per trade','<input type="number" step="0.1" id="riskCalcRiskPct" value="'+esc(rc.riskPct)+'">')+
+      field('Entry price ($)','<input type="number" step="0.01" id="riskCalcEntryPrice" value="'+esc(rc.entryPrice)+'">')+
+      field('Direction',dirSeg)+
+    '</div>';
+    if(rc.mode==='size'){
+      html+='<div class="field-grid" style="margin-top:12px;">'+
+        field('Stop price ($) <span class="hint" style="display:inline;">optional</span>','<input type="number" step="0.01" id="riskCalcStopPrice" value="'+esc(rc.stopPrice)+'">')+
+        field('Stop distance <span class="hint" style="display:inline;">used if no stop price</span>',
+          '<div style="display:flex;gap:6px;"><input type="number" step="0.01" id="riskCalcStopDistance" value="'+esc(rc.stopDistance)+'" style="flex:1;">'+
+          seg('riskCalcDistUnitSeg',[['percent','%'],['dollar','$']],rc.distanceUnit)+'</div>')+
+      '</div>';
+    } else {
+      html+='<div class="field-grid" style="margin-top:12px;">'+
+        field('Position size',
+          '<div style="display:flex;gap:6px;"><input type="number" step="1" id="riskCalcSharesInput" value="'+esc(rc.sharesOrValue)+'" style="flex:1;">'+
+          seg('riskCalcSharesUnitSeg',[['shares','Shares'],['dollars','$']],rc.sharesUnit)+'</div>')+
+      '</div>';
+    }
+    html+='<div id="riskCalcOutputs" style="margin-top:14px;">'+riskCalcOutputsHtml(computeRiskCalc(rc))+'</div>';
+    return html;
+  }
+  function updateRiskCalcOutputs(){
+    var out=document.getElementById('riskCalcOutputs');
+    if(!out) return;
+    out.innerHTML=riskCalcOutputsHtml(computeRiskCalc(riskCalcState()));
+  }
+  function wireRiskCalcEvents(){
+    var modeSegEl=document.getElementById('riskCalcModeSeg');
+    if(!modeSegEl) return; // widget not on the current dashboard
+    var rc=riskCalcState();
+
+    modeSegEl.querySelectorAll('button').forEach(function(btn){
+      btn.addEventListener('click',function(){
+        rc.mode=btn.getAttribute('data-val');
+        saveData(); renderDashboard();
+      });
+    });
+    var dirSegEl=document.getElementById('riskCalcDirSeg');
+    if(dirSegEl) dirSegEl.querySelectorAll('button').forEach(function(btn){
+      btn.addEventListener('click',function(){ rc.direction=btn.getAttribute('data-val'); saveData(); renderDashboard(); });
+    });
+    // Unit toggles don't change the field layout, so patch outputs + active class in place rather
+    // than a full renderDashboard() — keeps focus/cursor in any other field the user is mid-typing.
+    var distUnitSeg=document.getElementById('riskCalcDistUnitSeg');
+    if(distUnitSeg) distUnitSeg.querySelectorAll('button').forEach(function(btn){
+      btn.addEventListener('click',function(){
+        rc.distanceUnit=btn.getAttribute('data-val');
+        distUnitSeg.querySelectorAll('button').forEach(function(b){ b.classList.toggle('active', b===btn); });
+        updateRiskCalcOutputs(); saveData();
+      });
+    });
+    var sharesUnitSeg=document.getElementById('riskCalcSharesUnitSeg');
+    if(sharesUnitSeg) sharesUnitSeg.querySelectorAll('button').forEach(function(btn){
+      btn.addEventListener('click',function(){
+        rc.sharesUnit=btn.getAttribute('data-val');
+        sharesUnitSeg.querySelectorAll('button').forEach(function(b){ b.classList.toggle('active', b===btn); });
+        updateRiskCalcOutputs(); saveData();
+      });
+    });
+    var riskCalcSaveTimer=null;
+    function bindNumberInput(id,field){
+      var el=document.getElementById(id);
+      if(!el) return;
+      el.addEventListener('input',function(){
+        rc[field]=el.value;
+        updateRiskCalcOutputs();
+        if(riskCalcSaveTimer) clearTimeout(riskCalcSaveTimer);
+        riskCalcSaveTimer=setTimeout(function(){ saveData(); },500);
+      });
+    }
+    bindNumberInput('riskCalcAccountSize','accountSize');
+    bindNumberInput('riskCalcRiskPct','riskPct');
+    bindNumberInput('riskCalcEntryPrice','entryPrice');
+    bindNumberInput('riskCalcStopPrice','stopPrice');
+    bindNumberInput('riskCalcStopDistance','stopDistance');
+    bindNumberInput('riskCalcSharesInput','sharesOrValue');
+  }
+
+  // ============ STRATEGY BACKTESTER ============
+  // Fully client-side backtest engine for a small-cap premarket/open momentum pullback strategy.
+  // Operates on state.backtest = {datasets:[], strategies:[], compareSelection:[]}. Datasets hold
+  // imported 1-minute OHLCV bars; strategies hold rule configurations. The math functions below
+  // (computeEMA/computeVWAP/findSignals/simulateTradeFromSignal/runBacktest) are pure and DOM-free
+  // so they're straightforward to unit-test independent of rendering.
+  //
+  // Modeling notes (worth knowing, and called out in the changelog):
+  // - Long-only: this strategy buys pullbacks on a stock already up big on the day, so there's no
+  //   short-side mode here.
+  // - VWAP is cumulative from the first bar of whatever you imported for that ticker/date (usually
+  //   premarket open) — if your CSV starts earlier or later than you expect, VWAP will reflect that.
+  // - Entry fires at the OPEN of the bar AFTER a qualifying pullback touch (not the touch bar's own
+  //   close), so the simulation isn't using information it couldn't have had in real time.
+  // - "Resistance multiple" take-profit is implemented as an R-multiple target (a multiple of the
+  //   entry risk-per-share), consistent with how the rest of Tradalytics already thinks about
+  //   R-multiples — not literal price-resistance/pivot detection from the bars.
+  // - If a stop and a take-profit would both trigger on the same bar, the stop wins (the standard
+  //   conservative backtesting convention).
+
+  function ensureBacktest(){
+    if(!state.backtest) state.backtest={datasets:[],strategies:[],compareSelection:[]};
+    if(!state.backtest.datasets) state.backtest.datasets=[];
+    if(!state.backtest.strategies) state.backtest.strategies=[];
+    if(!state.backtest.compareSelection) state.backtest.compareSelection=[];
+  }
+  function btId(prefix){ return prefix+'_'+Date.now().toString(36)+Math.random().toString(36).slice(2,8); }
+  function minutesToHHMM(m){ var h=Math.floor(m/60),mm=m%60; return (h<10?'0':'')+h+':'+(mm<10?'0':'')+mm; }
+  function hhmmToMinutes(s){ var p=(s||'0:0').split(':'); return (parseInt(p[0],10)||0)*60+(parseInt(p[1],10)||0); }
+  function numOrNull(id){ var el=document.getElementById(id); if(!el) return null; var v=el.value; return v===''?null:parseFloat(v); }
+
+  // ---- indicator math ----
+  function computeEMA(bars,period){
+    var out=new Array(bars.length).fill(null);
+    if(!bars.length) return out;
+    var k=2/(period+1);
+    var seedLen=Math.min(period,bars.length);
+    var sum=0; for(var i=0;i<seedLen;i++) sum+=bars[i].c;
+    var ema=sum/seedLen;
+    out[seedLen-1]=ema;
+    for(var i=seedLen;i<bars.length;i++){ ema=bars[i].c*k+ema*(1-k); out[i]=ema; }
+    for(var i=0;i<seedLen-1;i++) out[i]=out[seedLen-1];
+    return out;
+  }
+  function computeVWAP(bars){
+    var out=new Array(bars.length).fill(null);
+    var cumPV=0,cumV=0;
+    for(var i=0;i<bars.length;i++){
+      var typical=(bars[i].h+bars[i].l+bars[i].c)/3;
+      cumPV+=typical*bars[i].v; cumV+=bars[i].v;
+      out[i]=cumV>0?cumPV/cumV:bars[i].c;
+    }
+    return out;
+  }
+  function maTouched(bar,maVal,tolerancePct){
+    if(maVal==null) return false;
+    var tol=(tolerancePct||0)/100;
+    var lo=bar.l*(1-tol), hi=bar.h*(1+tol);
+    return maVal>=lo && maVal<=hi;
+  }
+
+  // ---- eligibility + signal detection ----
+  function datasetEligible(ds,strat){
+    if(ds.dayGainPct==null || ds.dayGainPct<strat.minDayGainPct) return false;
+    if(strat.floatMin!=null && ds.floatShares!=null && ds.floatShares<strat.floatMin) return false;
+    if(strat.floatMax!=null && ds.floatShares!=null && ds.floatShares>strat.floatMax) return false;
+    if(strat.inThemeFilter==='yes' && !ds.inTheme) return false;
+    if(strat.inThemeFilter==='no' && ds.inTheme) return false;
+    return true;
+  }
+  function findSignals(ds,strat){
+    var bars=ds.bars;
+    var sel=strat.maSelection||{};
+    var ema9=sel.ema9?computeEMA(bars,9):null;
+    var ema20=sel.ema20?computeEMA(bars,20):null;
+    var vwap=sel.vwap?computeVWAP(bars):null;
+    var signals=[];
+    for(var i=0;i<bars.length;i++){
+      var bar=bars[i];
+      if(bar.t<strat.sessionStart || bar.t>strat.sessionEnd) continue;
+      var dollarVol=bar.c*bar.v;
+      if(dollarVol<strat.minDollarVolumePerCandle) continue;
+      var touches=[];
+      if(ema9 && maTouched(bar,ema9[i],strat.pullbackTolerancePct)) touches.push({key:'ema9',val:ema9[i]});
+      if(ema20 && maTouched(bar,ema20[i],strat.pullbackTolerancePct)) touches.push({key:'ema20',val:ema20[i]});
+      if(vwap && maTouched(bar,vwap[i],strat.pullbackTolerancePct)) touches.push({key:'vwap',val:vwap[i]});
+      if(!touches.length) continue;
+      if(strat.requireConfluence && touches.length<2) continue;
+      signals.push({barIndex:i,bar:bar,touches:touches});
+      if(strat.onePerDataset) break;
+    }
+    return signals;
+  }
+  function simulateTradeFromSignal(ds,strat,signal){
+    var bars=ds.bars;
+    var entryIdx=signal.barIndex+1;
+    if(entryIdx>=bars.length) return null;
+    var entryBar=bars[entryIdx];
+    var entry=entryBar.o;
+    var ex=strat.exit;
+    var stop;
+    if(ex.stopType==='pullbackLow') stop=signal.bar.l;
+    else if(ex.stopType==='belowMA') stop=signal.touches[0].val*(1-(ex.stopMaBufferPct||0)/100);
+    else if(ex.stopType==='fixedPct') stop=entry*(1-(ex.stopPct||0)/100);
+    else if(ex.stopType==='fixedDollar') stop=entry-(ex.stopDollar||0);
+    else stop=signal.bar.l;
+    var riskPerShare=entry-stop;
+    if(!(riskPerShare>0)) return null;
+    var riskAmount=(strat.accountSize||0)*(strat.riskPct||0)/100;
+    var shares=Math.floor(riskAmount/riskPerShare);
+    if(shares<1) return null;
+    var riskAmountActual=riskPerShare*shares;
+    var takeProfit=null;
+    if(ex.takeProfitType==='pct') takeProfit=entry*(1+(ex.takeProfitPct||0)/100);
+    else if(ex.takeProfitType==='dollar') takeProfit=entry+(ex.takeProfitDollar||0);
+    else if(ex.takeProfitType==='rMultiple') takeProfit=entry+riskPerShare*(ex.takeProfitR||0);
+    var trailingLevel=-Infinity;
+    var exitPrice=null,exitReason=null,exitIdx=null;
+    for(var i=entryIdx;i<bars.length;i++){
+      var bar=bars[i];
+      var minutesHeld=bar.t-entryBar.t;
+      var effectiveStop = ex.trailingStopEnabled ? Math.max(stop,trailingLevel) : stop;
+      if(bar.o<=effectiveStop){ exitPrice=bar.o; exitReason='stop (gap)'; exitIdx=i; break; }
+      if(takeProfit!=null && bar.o>=takeProfit){ exitPrice=bar.o; exitReason='target (gap)'; exitIdx=i; break; }
+      if(bar.l<=effectiveStop){ exitPrice=effectiveStop; exitReason='stop'; exitIdx=i; break; }
+      if(takeProfit!=null && bar.h>=takeProfit){ exitPrice=takeProfit; exitReason='target'; exitIdx=i; break; }
+      if(ex.timeExitEnabled && minutesHeld>=ex.timeExitMinutes){ exitPrice=bar.c; exitReason='time exit'; exitIdx=i; break; }
+      if(ex.forceCloseAtSessionEnd!==false && bar.t>=strat.sessionEnd){ exitPrice=bar.c; exitReason='session end'; exitIdx=i; break; }
+      if(ex.trailingStopEnabled){ var lvl=bar.c*(1-(ex.trailingStopPct||0)/100); trailingLevel=Math.max(trailingLevel,lvl); }
+      if(i===bars.length-1){ exitPrice=bar.c; exitReason='end of data'; exitIdx=i; }
+    }
+    if(exitPrice==null) return null;
+    var pnl=(exitPrice-entry)*shares;
+    var rMultiple=pnl/riskAmountActual;
+    var whichMa=signal.touches.map(function(t){return t.key;}).join('+');
+    return {
+      id:btId('trd'), datasetId:ds.id, ticker:ds.ticker, date:ds.date,
+      dayGainPct:ds.dayGainPct, floatShares:ds.floatShares, inTheme:!!ds.inTheme,
+      signalTime:signal.bar.t, entryTime:entryBar.t, exitTime:bars[exitIdx].t,
+      entryPrice:entry, exitPrice:exitPrice, stopPrice:stop, takeProfitPrice:takeProfit,
+      shares:shares, riskAmount:riskAmountActual, pnl:pnl, rMultiple:rMultiple,
+      exitReason:exitReason, whichMa:whichMa
+    };
+  }
+  function runBacktest(strat,datasets){
+    var trades=[];
+    datasets.forEach(function(ds){
+      if(!ds.bars || !ds.bars.length) return;
+      if(!datasetEligible(ds,strat)) return;
+      findSignals(ds,strat).forEach(function(sig){
+        var t=simulateTradeFromSignal(ds,strat,sig);
+        if(t) trades.push(t);
+      });
+    });
+    trades.sort(function(a,b){ return (a.date+String(a.entryTime)).localeCompare(b.date+String(b.entryTime)); });
+    return computeBacktestStats(trades);
+  }
+  function computeBacktestStats(trades){
+    var wins=trades.filter(function(t){return t.pnl>0;});
+    var losses=trades.filter(function(t){return t.pnl<0;});
+    var totalPnl=trades.reduce(function(a,t){return a+t.pnl;},0);
+    var winRate=trades.length?wins.length/trades.length*100:0;
+    var avgWin=wins.length?wins.reduce(function(a,t){return a+t.pnl;},0)/wins.length:0;
+    var avgLoss=losses.length?losses.reduce(function(a,t){return a+t.pnl;},0)/losses.length:0;
+    var grossWin=wins.reduce(function(a,t){return a+t.pnl;},0);
+    var grossLoss=Math.abs(losses.reduce(function(a,t){return a+t.pnl;},0));
+    var profitFactor=grossLoss>0?grossWin/grossLoss:(grossWin>0?Infinity:0);
+    var avgR=trades.length?trades.reduce(function(a,t){return a+t.rMultiple;},0)/trades.length:0;
+    var equity=[],running=0;
+    trades.forEach(function(t){ running+=t.pnl; equity.push({val:running}); });
+    var peak=-Infinity,maxDD=0;
+    equity.forEach(function(p){ peak=Math.max(peak,p.val); maxDD=Math.max(maxDD,peak-p.val); });
+    return {trades:trades,count:trades.length,wins:wins.length,losses:losses.length,winRate:winRate,
+      avgWin:avgWin,avgLoss:avgLoss,profitFactor:profitFactor,totalPnl:totalPnl,avgR:avgR,
+      equity:equity,maxDrawdown:maxDD};
+  }
+  function floatBucket(f){
+    if(f==null) return 'Unknown';
+    if(f<1000000) return '<1M'; if(f<2000000) return '1-2M'; if(f<3000000) return '2-3M';
+    if(f<5000000) return '3-5M'; return '>5M';
+  }
+  function timeBucket(minutes){ return minutes<570 ? 'Premarket (<9:30)' : 'First 30 min (9:30-10:00)'; }
+  function breakdownBy(trades,keyFn){
+    var groups={};
+    trades.forEach(function(t){
+      var k=keyFn(t);
+      if(!groups[k]) groups[k]={key:k,count:0,pnl:0,wins:0};
+      groups[k].count++; groups[k].pnl+=t.pnl; if(t.pnl>0) groups[k].wins++;
+    });
+    return Object.keys(groups).map(function(k){ var g=groups[k]; g.winRate=g.count?g.wins/g.count*100:0; return g; });
+  }
+
+  // ---- CSV import ----
+  function parseTimestampToMinutes(ts){
+    if(!ts) return null;
+    ts=String(ts).trim();
+    var m=ts.match(/(\d{1,2}):(\d{2})(:(\d{2}))?\s*([AaPp][Mm])?\s*$/);
+    if(!m) return null;
+    var h=parseInt(m[1],10), mins=parseInt(m[2],10);
+    var ap=m[5]?m[5].toUpperCase():null;
+    if(ap==='PM' && h<12) h+=12;
+    if(ap==='AM' && h===12) h=0;
+    if(h<0||h>23||mins<0||mins>59) return null;
+    return h*60+mins;
+  }
+  function parseOhlcvRows(rows){
+    return rows.map(function(r){
+      var keys=Object.keys(r);
+      var get=function(names){for(var i=0;i<names.length;i++){var k=keys.find(function(kk){return kk.toLowerCase().replace(/[^a-z]/g,'')===names[i];});if(k&&r[k]!==''&&r[k]!=null)return r[k];}return '';};
+      var ts=get(['timestamp','time','datetime','date']);
+      var o=get(['open']),h=get(['high']),l=get(['low']),c=get(['close']),v=get(['volume','vol']);
+      var minutes=parseTimestampToMinutes(ts);
+      if(minutes==null||o===''||h===''||l===''||c===''||v==='') return null;
+      return {t:minutes,o:parseFloat(o),h:parseFloat(h),l:parseFloat(l),c:parseFloat(c),v:parseFloat(v)};
+    }).filter(Boolean).sort(function(a,b){return a.t-b.t;});
+  }
+
+  // ---- strategy defaults + modal ----
+  function defaultStrategy(){
+    return {
+      id:null, name:'New Strategy',
+      minDayGainPct:30, floatMin:500000, floatMax:5000000, inThemeFilter:'any',
+      sessionStart:7*60, sessionEnd:10*60,
+      maSelection:{ema9:true,ema20:true,vwap:true}, requireConfluence:false,
+      pullbackTolerancePct:0.3, minDollarVolumePerCandle:200000,
+      exit:{
+        stopType:'pullbackLow', stopMaBufferPct:0.2, stopPct:5, stopDollar:0.25,
+        takeProfitType:'rMultiple', takeProfitPct:10, takeProfitDollar:1, takeProfitR:2,
+        trailingStopEnabled:false, trailingStopPct:5,
+        timeExitEnabled:false, timeExitMinutes:30, forceCloseAtSessionEnd:true
+      },
+      accountSize:(state.settings&&state.settings.accountSize)?state.settings.accountSize:10000,
+      riskPct:1, onePerDataset:true, createdAt:Date.now(), updatedAt:Date.now()
+    };
+  }
+  function strategyModalHtml(strat){
+    var ex=strat.exit;
+    return ''+
+      fieldGrid([field('Strategy name','<input type="text" id="stName" value="'+esc(strat.name)+'">')])+
+      '<div class="hint" style="margin-top:14px;margin-bottom:6px;"><b>Universe filter</b></div>'+
+      fieldGrid([
+        field('Min day gain % at entry','<input type="number" step="1" id="stMinDayGain" value="'+strat.minDayGainPct+'">'),
+        field('Float min (shares)','<input type="number" step="1" id="stFloatMin" value="'+(strat.floatMin!=null?strat.floatMin:'')+'">'),
+        field('Float max (shares)','<input type="number" step="1" id="stFloatMax" value="'+(strat.floatMax!=null?strat.floatMax:'')+'">'),
+        field('"In theme" filter',selectField('stInTheme',[['any','Any'],['yes','In theme only'],['no','Not in theme only']],strat.inThemeFilter))
+      ])+
+      '<div class="hint" style="margin-top:14px;margin-bottom:6px;"><b>Session window (ET)</b></div>'+
+      fieldGrid([
+        field('Window start','<input type="time" id="stSessionStart" value="'+minutesToHHMM(strat.sessionStart)+'">'),
+        field('Window end','<input type="time" id="stSessionEnd" value="'+minutesToHHMM(strat.sessionEnd)+'">')
+      ])+
+      '<div class="hint" style="margin-top:14px;margin-bottom:6px;"><b>Pullback setup</b></div>'+
+      fieldGrid([
+        field('9 EMA counts as a pullback zone',toggleHtml('stMaEma9',!!strat.maSelection.ema9)),
+        field('20 EMA counts as a pullback zone',toggleHtml('stMaEma20',!!strat.maSelection.ema20)),
+        field('VWAP counts as a pullback zone',toggleHtml('stMaVwap',!!strat.maSelection.vwap)),
+        field('Require confluence (2+ MAs at once)',toggleHtml('stConfluence',!!strat.requireConfluence))
+      ])+
+      fieldGrid([
+        field('Pullback tolerance % (band around the MA)','<input type="number" step="0.05" id="stTolerance" value="'+strat.pullbackTolerancePct+'">'),
+        field('Min $ volume per 1-min candle','<input type="number" step="1000" id="stMinDollarVol" value="'+strat.minDollarVolumePerCandle+'">')
+      ])+
+      '<div class="hint" style="margin-top:14px;margin-bottom:6px;"><b>Exit rules</b> — every enabled exit is checked each bar; if a stop and a target would both trigger on the same bar, the stop wins.</div>'+
+      fieldGrid([
+        field('Stop-loss type',selectField('stStopType',[['pullbackLow','Below the pullback low'],['belowMA','Below the touched MA'],['fixedPct','Fixed % below entry'],['fixedDollar','Fixed $ below entry']],ex.stopType)),
+        field('MA buffer % (if "Below MA")','<input type="number" step="0.05" id="stStopMaBuffer" value="'+ex.stopMaBufferPct+'">'),
+        field('Fixed stop % (if "Fixed %")','<input type="number" step="0.1" id="stStopPct" value="'+ex.stopPct+'">'),
+        field('Fixed stop $ (if "Fixed $")','<input type="number" step="0.01" id="stStopDollar" value="'+ex.stopDollar+'">')
+      ])+
+      fieldGrid([
+        field('Take-profit type',selectField('stTpType',[['none','None (rely on trailing/time/session-end)'],['pct','Fixed % above entry'],['dollar','Fixed $ above entry'],['rMultiple','R-multiple of risk']],ex.takeProfitType)),
+        field('Target % (if "Fixed %")','<input type="number" step="0.5" id="stTpPct" value="'+ex.takeProfitPct+'">'),
+        field('Target $ (if "Fixed $")','<input type="number" step="0.01" id="stTpDollar" value="'+ex.takeProfitDollar+'">'),
+        field('Target R-multiple (if "R-multiple")','<input type="number" step="0.5" id="stTpR" value="'+ex.takeProfitR+'">')
+      ])+
+      fieldGrid([
+        field('Trailing stop enabled',toggleHtml('stTrailEnabled',!!ex.trailingStopEnabled)),
+        field('Trailing stop % (ratchets up only)','<input type="number" step="0.5" id="stTrailPct" value="'+ex.trailingStopPct+'">'),
+        field('Time-based exit enabled',toggleHtml('stTimeEnabled',!!ex.timeExitEnabled)),
+        field('Max minutes held','<input type="number" step="1" id="stTimeMinutes" value="'+ex.timeExitMinutes+'">')
+      ])+
+      fieldGrid([field('Force-close at session end',toggleHtml('stForceClose',ex.forceCloseAtSessionEnd!==false))])+
+      '<div class="hint" style="margin-top:14px;margin-bottom:6px;"><b>Position sizing</b></div>'+
+      fieldGrid([
+        field('Account size ($)','<input type="number" step="100" id="stAccountSize" value="'+strat.accountSize+'">'),
+        field('Risk % per trade','<input type="number" step="0.1" id="stRiskPct" value="'+strat.riskPct+'">'),
+        field('One trade per dataset (recommended)',toggleHtml('stOnePer',strat.onePerDataset!==false))
+      ]);
+  }
+  function openStrategyModal(id){
+    ensureBacktest();
+    var strat = id ? JSON.parse(JSON.stringify(state.backtest.strategies.find(function(s){return s.id===id;}))) : defaultStrategy();
+    if(!strat) return;
+    var wrap=document.createElement('div');
+    wrap.className='modal-wrap show';
+    wrap.style.zIndex='200';
+    wrap.innerHTML='<div class="modal" style="max-width:720px;">'+
+      '<div class="modal-head"><h3>'+(id?'Edit strategy':'New strategy')+'</h3><button class="close" id="stModalClose">✕</button></div>'+
+      '<div class="modal-body">'+strategyModalHtml(strat)+'</div>'+
+      '<div class="modal-footer"><button class="btn ghost" id="stModalCancel">Cancel</button><button class="btn primary" id="stModalSave">Save strategy</button></div>'+
+    '</div>';
+    document.body.appendChild(wrap);
+    ['stMaEma9','stMaEma20','stMaVwap','stConfluence','stTrailEnabled','stTimeEnabled','stForceClose','stOnePer'].forEach(function(id2){
+      var el=document.getElementById(id2);
+      if(el) el.addEventListener('change',function(){ el.closest('.toggle-row').querySelector('label').textContent=el.checked?'Yes':'No'; });
+    });
+    function close(){ wrap.remove(); }
+    wrap.querySelector('#stModalClose').onclick=close;
+    wrap.querySelector('#stModalCancel').onclick=close;
+    wrap.addEventListener('click',function(e){ if(e.target===wrap) close(); });
+    wrap.querySelector('#stModalSave').onclick=function(){
+      var name=document.getElementById('stName').value.trim();
+      if(!name){ document.getElementById('stName').focus(); return; }
+      strat.name=name;
+      strat.minDayGainPct=parseFloat(document.getElementById('stMinDayGain').value)||0;
+      strat.floatMin=numOrNull('stFloatMin');
+      strat.floatMax=numOrNull('stFloatMax');
+      strat.inThemeFilter=document.getElementById('stInTheme').value;
+      strat.sessionStart=hhmmToMinutes(document.getElementById('stSessionStart').value);
+      strat.sessionEnd=hhmmToMinutes(document.getElementById('stSessionEnd').value);
+      strat.maSelection={
+        ema9:document.getElementById('stMaEma9').checked,
+        ema20:document.getElementById('stMaEma20').checked,
+        vwap:document.getElementById('stMaVwap').checked
+      };
+      strat.requireConfluence=document.getElementById('stConfluence').checked;
+      strat.pullbackTolerancePct=parseFloat(document.getElementById('stTolerance').value)||0;
+      strat.minDollarVolumePerCandle=parseFloat(document.getElementById('stMinDollarVol').value)||0;
+      strat.exit={
+        stopType:document.getElementById('stStopType').value,
+        stopMaBufferPct:parseFloat(document.getElementById('stStopMaBuffer').value)||0,
+        stopPct:parseFloat(document.getElementById('stStopPct').value)||0,
+        stopDollar:parseFloat(document.getElementById('stStopDollar').value)||0,
+        takeProfitType:document.getElementById('stTpType').value,
+        takeProfitPct:parseFloat(document.getElementById('stTpPct').value)||0,
+        takeProfitDollar:parseFloat(document.getElementById('stTpDollar').value)||0,
+        takeProfitR:parseFloat(document.getElementById('stTpR').value)||0,
+        trailingStopEnabled:document.getElementById('stTrailEnabled').checked,
+        trailingStopPct:parseFloat(document.getElementById('stTrailPct').value)||0,
+        timeExitEnabled:document.getElementById('stTimeEnabled').checked,
+        timeExitMinutes:parseFloat(document.getElementById('stTimeMinutes').value)||0,
+        forceCloseAtSessionEnd:document.getElementById('stForceClose').checked
+      };
+      strat.accountSize=parseFloat(document.getElementById('stAccountSize').value)||0;
+      strat.riskPct=parseFloat(document.getElementById('stRiskPct').value)||0;
+      strat.onePerDataset=document.getElementById('stOnePer').checked;
+      strat.updatedAt=Date.now();
+      if(!strat.id){
+        strat.id=btId('st'); strat.createdAt=Date.now();
+        state.backtest.strategies.push(strat);
+      } else {
+        var idx=state.backtest.strategies.findIndex(function(s){return s.id===strat.id;});
+        state.backtest.strategies[idx]=strat;
+      }
+      saveData().then(function(){ close(); renderBacktester(); });
+    };
+  }
+
+  // ---- tab switching ----
+  function switchBacktestTab(tab){
+    backtestState.tab=tab;
+    document.querySelectorAll('#backtesterTabs .btab').forEach(function(b){ b.classList.toggle('active', b.getAttribute('data-btab')===tab); });
+    document.querySelectorAll('.btab-panel').forEach(function(p){ p.style.display='none'; });
+    var panel=document.getElementById('btab-'+tab);
+    if(panel) panel.style.display='block';
+    renderBacktester();
+  }
+
+  // ---- Datasets tab ----
+  function renderBacktestDatasetsTab(){
+    var body=document.getElementById('backtestDatasetsBody');
+    if(!body) return;
+    var datasets=state.backtest.datasets;
+    var rows=datasets.map(function(ds){
+      return '<tr data-ds-id="'+ds.id+'">'+
+        '<td>'+esc(ds.ticker)+'</td><td>'+esc(ds.date)+'</td>'+
+        '<td>'+(ds.dayGainPct!=null?ds.dayGainPct+'%':'—')+'</td>'+
+        '<td>'+(ds.floatShares!=null?ds.floatShares.toLocaleString():'—')+'</td>'+
+        '<td>'+(ds.inTheme?'Yes':'No')+'</td><td>'+ds.bars.length+'</td>'+
+        '<td><button class="btn small ghost btnDeleteDataset" data-id="'+ds.id+'">Delete</button></td>'+
+      '</tr>';
+    }).join('');
+    body.innerHTML=
+      '<div class="panel" style="margin-bottom:16px;">'+
+        '<div class="panel-title">Import 1-minute OHLCV CSV</div>'+
+        '<div class="hint">Columns: timestamp, open, high, low, close, volume. Timestamp can be a full date/time or just HH:MM (24h or with AM/PM) — either way it\'s read as minutes-since-midnight for that session.</div>'+
+        fieldGrid([
+          field('Ticker','<input type="text" id="bdTicker" placeholder="e.g. ABCD" style="text-transform:uppercase;">'),
+          field('Date','<input type="date" id="bdDate">'),
+          field("Day's gain % at entry",'<input type="number" step="0.1" id="bdDayGain" placeholder="e.g. 45">'),
+          field('Float (shares)','<input type="number" step="1" id="bdFloat" placeholder="e.g. 2000000">')
+        ])+
+        fieldGrid([field('In theme? (sector/news catalyst momentum)',toggleHtml('bdInTheme',false))])+
+        '<div class="field" style="margin-top:14px;"><label>CSV file</label><input type="file" id="bdCsvFile" accept=".csv"></div>'+
+        '<div id="bdImportStatus" class="hint" style="margin-top:8px;"></div>'+
+        '<button class="btn primary" id="bdImportBtn" style="margin-top:10px;">Import CSV</button>'+
+      '</div>'+
+      '<div class="panel">'+
+        '<div class="panel-title">Imported datasets ('+datasets.length+')</div>'+
+        (datasets.length?
+          '<table class="jtable"><thead><tr><th>Ticker</th><th>Date</th><th>Day Gain</th><th>Float</th><th>In Theme</th><th>Bars</th><th></th></tr></thead><tbody>'+rows+'</tbody></table>'
+          : '<div class="empty-state">No datasets imported yet. Import a 1-minute OHLCV CSV above to get started.</div>')+
+      '</div>';
+    wireBacktestDatasetsTab();
+  }
+  function wireBacktestDatasetsTab(){
+    var inTheme=document.getElementById('bdInTheme');
+    if(inTheme) inTheme.addEventListener('change',function(){ inTheme.closest('.toggle-row').querySelector('label').textContent=inTheme.checked?'Yes':'No'; });
+    document.querySelectorAll('.btnDeleteDataset').forEach(function(b){
+      b.onclick=function(){
+        var id=b.getAttribute('data-id');
+        customConfirm('Delete this dataset? This cannot be undone.').then(function(ok){
+          if(!ok) return;
+          state.backtest.datasets=state.backtest.datasets.filter(function(d){return d.id!==id;});
+          saveData().then(renderBacktester);
+        });
+      };
+    });
+    var importBtn=document.getElementById('bdImportBtn');
+    if(importBtn) importBtn.onclick=function(){
+      var status=document.getElementById('bdImportStatus');
+      var ticker=(document.getElementById('bdTicker').value||'').trim().toUpperCase();
+      var date=document.getElementById('bdDate').value;
+      var dayGain=document.getElementById('bdDayGain').value;
+      var floatShares=document.getElementById('bdFloat').value;
+      var inThemeVal=document.getElementById('bdInTheme').checked;
+      var fileInput=document.getElementById('bdCsvFile');
+      var file=fileInput.files[0];
+      if(!ticker || !date){ status.textContent='Ticker and date are required.'; return; }
+      if(!file){ status.textContent='Choose a CSV file first.'; return; }
+      status.textContent='Reading CSV...';
+      var reader=new FileReader();
+      reader.onload=function(e){
+        var parsed=Papa.parse(e.target.result,{header:true,skipEmptyLines:true});
+        var bars=parseOhlcvRows(parsed.data);
+        if(!bars.length){ status.textContent='No recognizable OHLCV rows found. Check the CSV has timestamp, open, high, low, close, volume columns.'; return; }
+        var ds={id:btId('ds'),ticker:ticker,date:date,
+          dayGainPct:dayGain!==''?parseFloat(dayGain):null,
+          floatShares:floatShares!==''?parseFloat(floatShares):null,
+          inTheme:inThemeVal, bars:bars, createdAt:Date.now()};
+        state.backtest.datasets.push(ds);
+        saveData().then(function(){ status.textContent=''; renderBacktester(); });
+      };
+      reader.readAsText(file);
+    };
+  }
+
+  // ---- Strategy tab ----
+  function renderBacktestStrategyTab(){
+    var body=document.getElementById('backtestStrategyBody');
+    if(!body) return;
+    var strategies=state.backtest.strategies;
+    var rows=strategies.map(function(s){
+      var maLabel=Object.keys(s.maSelection).filter(function(k){return s.maSelection[k];}).map(function(k){return k==='ema9'?'9EMA':k==='ema20'?'20EMA':'VWAP';}).join(' + ')||'—';
+      var checked=state.backtest.compareSelection.indexOf(s.id)>-1;
+      return '<tr data-strat-id="'+s.id+'">'+
+        '<td><input type="checkbox" class="cmpCheck" data-id="'+s.id+'" '+(checked?'checked':'')+'></td>'+
+        '<td>'+esc(s.name)+'</td>'+
+        '<td>'+maLabel+(s.requireConfluence?' (confluence)':'')+'</td>'+
+        '<td>'+s.riskPct+'%</td><td>$'+Number(s.accountSize).toLocaleString()+'</td>'+
+        '<td>'+
+          '<button class="btn small ghost btnRunStrategy" data-id="'+s.id+'">Run</button> '+
+          '<button class="btn small ghost btnEditStrategy" data-id="'+s.id+'">Edit</button> '+
+          '<button class="btn small ghost btnDupStrategy" data-id="'+s.id+'">Duplicate</button> '+
+          '<button class="btn small ghost btnDeleteStrategy" data-id="'+s.id+'">Delete</button>'+
+        '</td>'+
+      '</tr>';
+    }).join('');
+    body.innerHTML=
+      '<div class="page-head" style="margin-bottom:14px;"><div></div><div class="head-actions"><button class="btn primary" id="btnNewStrategy">+ New strategy</button></div></div>'+
+      (strategies.length?
+        '<table class="jtable"><thead><tr><th>Compare</th><th>Name</th><th>Pullback MAs</th><th>Risk %</th><th>Account</th><th></th></tr></thead><tbody>'+rows+'</tbody></table>'
+        : '<div class="empty-state">No strategies yet. Create one to define your entry/exit rules.</div>');
+    wireBacktestStrategyTab();
+  }
+  function wireBacktestStrategyTab(){
+    var btnNew=document.getElementById('btnNewStrategy');
+    if(btnNew) btnNew.onclick=function(){ openStrategyModal(null); };
+    document.querySelectorAll('.btnEditStrategy').forEach(function(b){ b.onclick=function(){ openStrategyModal(b.getAttribute('data-id')); }; });
+    document.querySelectorAll('.btnDupStrategy').forEach(function(b){
+      b.onclick=function(){
+        var id=b.getAttribute('data-id');
+        var orig=state.backtest.strategies.find(function(s){return s.id===id;});
+        if(!orig) return;
+        var copy=JSON.parse(JSON.stringify(orig));
+        copy.id=btId('st'); copy.name=orig.name+' (copy)'; copy.createdAt=Date.now(); copy.updatedAt=Date.now();
+        state.backtest.strategies.push(copy);
+        saveData().then(renderBacktester);
+      };
+    });
+    document.querySelectorAll('.btnDeleteStrategy').forEach(function(b){
+      b.onclick=function(){
+        var id=b.getAttribute('data-id');
+        customConfirm('Delete this strategy? This cannot be undone.').then(function(ok){
+          if(!ok) return;
+          state.backtest.strategies=state.backtest.strategies.filter(function(s){return s.id!==id;});
+          state.backtest.compareSelection=state.backtest.compareSelection.filter(function(cid){return cid!==id;});
+          saveData().then(renderBacktester);
+        });
+      };
+    });
+    document.querySelectorAll('.btnRunStrategy').forEach(function(b){
+      b.onclick=function(){ backtestState.activeStrategyId=b.getAttribute('data-id'); backtestState.activeResults=null; switchBacktestTab('results'); };
+    });
+    document.querySelectorAll('.cmpCheck').forEach(function(cb){
+      cb.addEventListener('change',function(){
+        var id=cb.getAttribute('data-id');
+        var sel=state.backtest.compareSelection;
+        if(cb.checked){ if(sel.indexOf(id)===-1) sel.push(id); }
+        else { state.backtest.compareSelection=sel.filter(function(x){return x!==id;}); }
+        saveData();
+      });
+    });
+  }
+
+  // ---- Results tab ----
+  function renderBacktestResultsTab(){
+    var body=document.getElementById('backtestResultsBody');
+    if(!body) return;
+    var strategies=state.backtest.strategies;
+    if(!strategies.length){ body.innerHTML='<div class="empty-state">Create a strategy in the Strategy tab first.</div>'; return; }
+    if(!backtestState.activeStrategyId || !strategies.find(function(s){return s.id===backtestState.activeStrategyId;})){
+      backtestState.activeStrategyId=strategies[0].id;
+    }
+    var options=strategies.map(function(s){return [s.id,s.name];});
+    body.innerHTML=
+      '<div class="report-controls">'+
+        '<div class="field" style="min-width:260px;"><label>Strategy</label>'+selectField('resStrategySel',options,backtestState.activeStrategyId)+'</div>'+
+        '<button class="btn primary" id="btnRunBacktest">Run backtest</button>'+
+      '</div>'+
+      '<div id="backtestResultsOutput"></div>';
+    document.getElementById('resStrategySel').addEventListener('change',function(e){
+      backtestState.activeStrategyId=e.target.value; backtestState.activeResults=null; renderResultsOutput();
+    });
+    document.getElementById('btnRunBacktest').onclick=function(){
+      var strat=state.backtest.strategies.find(function(s){return s.id===backtestState.activeStrategyId;});
+      var eligible=state.backtest.datasets.filter(function(ds){return datasetEligible(ds,strat);});
+      backtestState.activeResults=runBacktest(strat,state.backtest.datasets);
+      backtestState.activeResults.eligibleDatasetCount=eligible.length;
+      renderResultsOutput();
+    };
+    renderResultsOutput();
+  }
+  function renderResultsOutput(){
+    var out=document.getElementById('backtestResultsOutput');
+    if(!out) return;
+    var res=backtestState.activeResults;
+    if(!res){ out.innerHTML='<div class="empty-state" style="margin-top:16px;">Click "Run backtest" to test this strategy against your imported datasets.</div>'; return; }
+    if(!res.count){
+      out.innerHTML='<div class="empty-state" style="margin-top:16px;">No qualifying trades found — '+res.eligibleDatasetCount+' dataset(s) matched the universe filter, but none produced a valid pullback signal and entry under this strategy\'s rules.</div>';
+      return;
+    }
+    var floatBk=breakdownBy(res.trades,function(t){return floatBucket(t.floatShares);});
+    var themeBk=breakdownBy(res.trades,function(t){return t.inTheme?'In theme':'Not in theme';});
+    var maBk=breakdownBy(res.trades,function(t){return t.whichMa;});
+    var timeBk=breakdownBy(res.trades,function(t){return timeBucket(t.entryTime);});
+    function bkHtml(bk){
+      var max=Math.max.apply(null,bk.map(function(g){return Math.abs(g.pnl);}).concat([1]));
+      return bk.map(function(g){return barRow(esc(g.key)+' ('+g.count+', '+g.winRate.toFixed(0)+'% win)',g.pnl,max);}).join('');
+    }
+    out.innerHTML=
+      '<div class="mini-stat-grid" style="margin-top:16px;">'+
+        '<div class="mini-stat"><div class="l">TRADES</div><div class="v">'+res.count+'</div></div>'+
+        '<div class="mini-stat"><div class="l">WIN RATE</div><div class="v">'+res.winRate.toFixed(1)+'%</div></div>'+
+        '<div class="mini-stat"><div class="l">AVG WIN / LOSS</div><div class="v">'+fmtMoney(res.avgWin)+' / '+fmtMoney(res.avgLoss)+'</div></div>'+
+        '<div class="mini-stat"><div class="l">PROFIT FACTOR</div><div class="v">'+(isFinite(res.profitFactor)?res.profitFactor.toFixed(2):'∞')+'</div></div>'+
+        '<div class="mini-stat"><div class="l">TOTAL P&amp;L</div><div class="v '+pnlClass(res.totalPnl)+'">'+fmtMoney(res.totalPnl)+'</div></div>'+
+        '<div class="mini-stat"><div class="l">AVG R</div><div class="v">'+res.avgR.toFixed(2)+'R</div></div>'+
+        '<div class="mini-stat"><div class="l">MAX DRAWDOWN</div><div class="v neg">-'+fmtUsd(res.maxDrawdown)+'</div></div>'+
+      '</div>'+
+      '<div class="panel" style="margin-top:16px;"><div class="panel-title">Equity curve</div>'+equityChartHtml(res.equity)+'</div>'+
+      '<div class="panels-row" style="margin-top:16px;">'+
+        '<div class="panel"><div class="panel-title">By float bucket</div>'+bkHtml(floatBk)+'</div>'+
+        '<div class="panel"><div class="panel-title">In theme vs not</div>'+bkHtml(themeBk)+'</div>'+
+      '</div>'+
+      '<div class="panels-row" style="margin-top:16px;">'+
+        '<div class="panel"><div class="panel-title">By MA touched</div>'+bkHtml(maBk)+'</div>'+
+        '<div class="panel"><div class="panel-title">By entry time bucket</div>'+bkHtml(timeBk)+'</div>'+
+      '</div>'+
+      '<div class="panel" style="margin-top:16px;"><div class="panel-title">Trade log</div>'+tradeLogHtml(res.trades)+'</div>';
+  }
+  function tradeLogHtml(trades){
+    var rows=trades.map(function(t){
+      return '<tr>'+
+        '<td>'+esc(t.ticker)+'</td><td>'+esc(t.date)+'</td>'+
+        '<td>'+minutesToHHMM(t.entryTime)+' @ '+fmtUsd(t.entryPrice)+'</td>'+
+        '<td>'+minutesToHHMM(t.exitTime)+' @ '+fmtUsd(t.exitPrice)+'</td>'+
+        '<td>'+fmtUsd(t.stopPrice)+'</td>'+
+        '<td>'+t.shares.toLocaleString()+'</td>'+
+        '<td>'+(t.floatShares!=null?t.floatShares.toLocaleString():'—')+'</td>'+
+        '<td>'+(t.dayGainPct!=null?t.dayGainPct+'%':'—')+'</td>'+
+        '<td>'+(t.inTheme?'Yes':'No')+'</td>'+
+        '<td class="'+pnlClass(t.pnl)+'">'+fmtMoney(t.pnl)+'</td>'+
+        '<td>'+t.rMultiple.toFixed(2)+'R</td>'+
+        '<td>'+esc(t.exitReason)+'</td>'+
+      '</tr>';
+    }).join('');
+    return '<table class="jtable"><thead><tr><th>Ticker</th><th>Date</th><th>Entry</th><th>Exit</th><th>Stop</th><th>Shares</th><th>Float</th><th>Day gain</th><th>In theme</th><th>P&amp;L</th><th>R</th><th>Exit reason</th></tr></thead><tbody>'+rows+'</tbody></table>';
+  }
+
+  // ---- Compare tab ----
+  function renderBacktestCompareTab(){
+    var body=document.getElementById('backtestCompareBody');
+    if(!body) return;
+    var selected=state.backtest.compareSelection.map(function(id){return state.backtest.strategies.find(function(s){return s.id===id;});}).filter(Boolean);
+    if(!selected.length){
+      body.innerHTML='<div class="empty-state">Check the "Compare" box next to strategies in the Strategy tab to compare them here (e.g. 9EMA-only vs VWAP-only vs confluence-required).</div>';
+      return;
+    }
+    body.innerHTML='<button class="btn primary" id="btnRunCompare" style="margin-bottom:14px;">Run comparison</button><div id="compareOutput"></div>';
+    document.getElementById('btnRunCompare').onclick=function(){
+      var results=selected.map(function(s){ return {strategy:s,res:runBacktest(s,state.backtest.datasets)}; });
+      renderCompareOutput(results);
+    };
+  }
+  function renderCompareOutput(results){
+    var out=document.getElementById('compareOutput');
+    var rows=results.map(function(r){
+      var s=r.strategy,res=r.res;
+      return '<tr>'+
+        '<td>'+esc(s.name)+'</td><td>'+res.count+'</td><td>'+res.winRate.toFixed(1)+'%</td>'+
+        '<td class="'+pnlClass(res.totalPnl)+'">'+fmtMoney(res.totalPnl)+'</td>'+
+        '<td>'+(isFinite(res.profitFactor)?res.profitFactor.toFixed(2):'∞')+'</td>'+
+        '<td>-'+fmtUsd(res.maxDrawdown)+'</td><td>'+res.avgR.toFixed(2)+'R</td>'+
+        '<td style="min-width:160px;max-width:220px;">'+(res.equity.length>1?sparkline(res.equity,'#2DD36F','#EF4444',true):'—')+'</td>'+
+      '</tr>';
+    }).join('');
+    out.innerHTML='<table class="jtable"><thead><tr><th>Strategy</th><th>Trades</th><th>Win rate</th><th>P&amp;L</th><th>Profit factor</th><th>Max DD</th><th>Avg R</th><th>Equity</th></tr></thead><tbody>'+rows+'</tbody></table>';
+  }
+
+  // ---- top-level dispatcher ----
+  function renderBacktester(){
+    ensureBacktest();
+    if(backtestState.tab==='datasets') renderBacktestDatasetsTab();
+    else if(backtestState.tab==='strategy') renderBacktestStrategyTab();
+    else if(backtestState.tab==='results') renderBacktestResultsTab();
+    else if(backtestState.tab==='compare') renderBacktestCompareTab();
+  }
+  document.querySelectorAll('#backtesterTabs .btab').forEach(function(btn){
+    btn.addEventListener('click',function(){ switchBacktestTab(btn.getAttribute('data-btab')); });
+  });
+
+
   var DAY_KEYS=['mo','tu','we','th','fr','sa','su'];
   var DAY_LABELS={mo:'Mon',tu:'Tue',we:'Wed',th:'Thu',fr:'Fri',sa:'Sat',su:'Sun'};
   function ensureRules(){
@@ -4677,6 +5671,7 @@
 
   // ============ REPORTS ============
   var reportsState={tab:'overview',period:'recent',range:30,calMonth:new Date(view.month.getFullYear(),view.month.getMonth(),1)};
+  var backtestState={tab:'datasets',editingStrategyId:null,activeStrategyId:null,activeResults:null};
   function dateRangeArray(days){
     var arr=[]; var end=new Date();
     for(var i=days-1;i>=0;i--){
@@ -5295,6 +6290,7 @@
       }
       clearModalError();
       var newDate=t.date||view.editingDate;
+      var oldDateForSync=view.editingId?view.editingDate:null;
       if(view.editingId){
         var oldList=state.days[view.editingDate]||[];
         state.days[view.editingDate]=oldList.filter(function(x){return x.id!==view.editingId;});
@@ -5302,6 +6298,8 @@
       }
       if(!state.days[newDate]) state.days[newDate]=[];
       state.days[newDate].push(t);
+      queueDaySync(newDate);
+      if(oldDateForSync && oldDateForSync!==newDate) queueDaySync(oldDateForSync);
       // fingerprint this trade's fills so a later IBKR/CSV import of the same fills is recognized and skipped, not duplicated
       if(!state.importedFingerprints) state.importedFingerprints=[];
       var fpSet={}; state.importedFingerprints.forEach(function(fp){fpSet[fp]=true;});
@@ -5340,6 +6338,7 @@
       state.trash=state.trash||[];
       state.trash.push({trade:target,date:dateKey,deletedAt:new Date().toISOString()});
     }
+    queueDaySync(dateKey);
     saveData().then(function(){
       closeModal(); renderAll();
       if(document.getElementById('drawer').classList.contains('show')) openDrawer(view.selectedDate);
@@ -5348,6 +6347,7 @@
           state.trash=(state.trash||[]).filter(function(item){return !(item.date===dateKey && item.trade.id===target.id);});
           state.days[dateKey]=state.days[dateKey]||[];
           state.days[dateKey].push(target);
+          queueDaySync(dateKey);
           saveData().then(function(){ renderAll(); });
         });
       }
@@ -5429,6 +6429,7 @@
     if(verEl) verEl.textContent='Tradalytics v'+APP_VERSION+' · schema v'+SCHEMA_VERSION;
     renderTrashList();
     renderAppLockStatus();
+    renderCloudSyncStatus();
     document.getElementById('settingsWrap').classList.add('show');
   }
   function closeSettings(){document.getElementById('settingsWrap').classList.remove('show');}
@@ -5500,12 +6501,13 @@
         state.trash=state.trash||[];
         var importedFrom=d.schemaVersion||1;
         if(importedFrom<SCHEMA_VERSION) state=migrateData(state,importedFrom);
+        markAllDaysDirtyForSync();
         var imageEntries=Object.keys(parsed.images||{});
         Promise.all(imageEntries.map(function(k){ return storageSet(k,parsed.images[k],false).catch(function(){}); }))
           .then(function(){ return saveData(); })
           .then(function(){
             status.textContent='\u2713 Restored '+allTradesFlat().length+' trades and '+imageEntries.length+' screenshots. Reloading...';
-            ensureLayouts(); ensureRules(); ensureCoachSessions(); applyTheme();
+            ensureLayouts(); ensureRules(); ensureBacktest(); ensureCoachSessions(); applyTheme();
             renderAll(); renderNotifPanel(); renderCoachMessages();
             closeSettings();
           });
@@ -5552,6 +6554,168 @@
   }
   document.getElementById('btnExportCsv').addEventListener('click',exportCSV);
 
+  // ---- cloud sync (optional, zero-cost, Firebase-backed) ----
+  // Whole-day, last-write-wins model: each calendar day's trades sync as one Firestore document,
+  // keyed by an updatedAt timestamp. Screenshots never leave the device (stripped before push,
+  // re-attached from local state after pull by matching trade id) — only text/number fields sync.
+  // Everything here is defensive: if window.TradSync never shows up, or every call fails, the app
+  // must keep working exactly as it did before this feature existed.
+  var syncDirty={}, syncDebounceTimer=null, syncInFlight=false;
+  function setCloudSyncActivity(msg){
+    var el=document.getElementById('cloudSyncActivity');
+    if(el) el.textContent=msg||'';
+  }
+  function stripImagesForSync(trades){
+    var dropFields={entryShot:1,exitShot:1,entryShotKey:1,exitShotKey:1,extraImages:1};
+    return (trades||[]).map(function(t){
+      var copy={};
+      Object.keys(t).forEach(function(k){ if(!dropFields[k]) copy[k]=t[k]; });
+      return copy;
+    });
+  }
+  function mergeRemoteTradesWithLocalImages(dateKey,remoteTrades){
+    var localById={};
+    (state.days[dateKey]||[]).forEach(function(t){ if(t && t.id) localById[t.id]=t; });
+    var imageFields=['entryShot','exitShot','entryShotKey','exitShotKey','extraImages'];
+    return (remoteTrades||[]).map(function(rt){
+      var lt=localById[rt.id];
+      if(lt){ imageFields.forEach(function(f){ if(lt[f]!==undefined) rt[f]=lt[f]; }); }
+      return rt;
+    });
+  }
+  function queueDaySync(dateKey){
+    if(!dateKey) return;
+    state.dayUpdatedAt=state.dayUpdatedAt||{};
+    state.dayUpdatedAt[dateKey]=Date.now();
+    syncDirty[dateKey]=true;
+    if(syncDebounceTimer) clearTimeout(syncDebounceTimer);
+    syncDebounceTimer=setTimeout(flushDaySync,1800);
+  }
+  function markAllDaysDirtyForSync(){
+    state.dayUpdatedAt=state.dayUpdatedAt||{};
+    Object.keys(state.days||{}).forEach(function(dk){ state.dayUpdatedAt[dk]=Date.now(); syncDirty[dk]=true; });
+    if(syncDebounceTimer) clearTimeout(syncDebounceTimer);
+    syncDebounceTimer=setTimeout(flushDaySync,1800);
+  }
+  function flushDaySync(){
+    syncDebounceTimer=null;
+    if(!window.TradSync || !window.TradSync.ready || !window.TradSync.user) return;
+    if(syncInFlight){ syncDebounceTimer=setTimeout(flushDaySync,1800); return; }
+    var keys=Object.keys(syncDirty);
+    if(!keys.length) return;
+    syncInFlight=true;
+    setCloudSyncActivity('Syncing…');
+    Promise.all(keys.map(function(dateKey){
+      var trades=stripImagesForSync(state.days[dateKey]||[]);
+      var updatedAt=(state.dayUpdatedAt&&state.dayUpdatedAt[dateKey])||Date.now();
+      return window.TradSync.pushDay(dateKey,trades,updatedAt).then(function(){ delete syncDirty[dateKey]; })
+        .catch(function(e){ console.warn('Cloud sync: push failed for '+dateKey,e); });
+    })).then(function(){
+      syncInFlight=false;
+      var remaining=Object.keys(syncDirty).length;
+      setCloudSyncActivity(remaining ? 'Sync pending…' : ('Synced ✓ '+new Date().toLocaleTimeString()));
+      if(remaining) syncDebounceTimer=setTimeout(flushDaySync,4000);
+    });
+  }
+  function pullAndMergeCloudData(){
+    if(!window.TradSync || !window.TradSync.ready || !window.TradSync.user) return;
+    setCloudSyncActivity('Checking cloud for updates…');
+    window.TradSync.pullAllDays().then(function(remoteDays){
+      state.dayUpdatedAt=state.dayUpdatedAt||{};
+      var remoteKeys={};
+      (remoteDays||[]).forEach(function(item){
+        remoteKeys[item.dateKey]=true;
+        var remoteUpdated=(item.data&&item.data.updatedAt)||0;
+        var remoteTrades=(item.data&&item.data.trades)||[];
+        var localUpdated=state.dayUpdatedAt[item.dateKey]||0;
+        if(remoteUpdated>localUpdated){
+          var merged=mergeRemoteTradesWithLocalImages(item.dateKey,remoteTrades);
+          if(merged.length===0) delete state.days[item.dateKey]; else state.days[item.dateKey]=merged;
+          state.dayUpdatedAt[item.dateKey]=remoteUpdated;
+        } else if(localUpdated>remoteUpdated){
+          syncDirty[item.dateKey]=true;
+        }
+      });
+      Object.keys(state.days||{}).forEach(function(dk){ if(!remoteKeys[dk]) syncDirty[dk]=true; });
+      return saveData().then(function(){
+        renderAll();
+        if(Object.keys(syncDirty).length){ flushDaySync(); } else { setCloudSyncActivity('Synced ✓ '+new Date().toLocaleTimeString()); }
+      });
+    }).catch(function(e){
+      console.warn('Cloud sync: initial pull failed',e);
+      setCloudSyncActivity('Could not reach cloud sync right now — your local data is unaffected.');
+    });
+  }
+  function renderCloudSyncStatus(){
+    var statusEl=document.getElementById('cloudSyncStatus');
+    var outEl=document.getElementById('cloudSyncSignedOut');
+    var inEl=document.getElementById('cloudSyncSignedIn');
+    if(!statusEl) return;
+    if(!window.TradSync || !window.TradSync.ready){
+      statusEl.textContent='Cloud sync isn\'t available right now (offline or blocked) — everything still works and saves locally.';
+      outEl.style.display='none'; inEl.style.display='none';
+      return;
+    }
+    if(window.TradSync.user===undefined){
+      statusEl.textContent='Checking sign-in status...';
+      outEl.style.display='none'; inEl.style.display='none';
+      return;
+    }
+    if(window.TradSync.user){
+      statusEl.textContent='';
+      outEl.style.display='none'; inEl.style.display='block';
+      var emailLine=document.getElementById('cloudSyncEmailLine');
+      if(emailLine) emailLine.textContent=window.TradSync.user.email||'';
+    } else {
+      statusEl.textContent='Not signed in — sign in or create a free account below to sync across your devices.';
+      outEl.style.display='block'; inEl.style.display='none';
+    }
+  }
+  function cloudSyncErrorMessage(e){
+    var code=(e&&e.code)||'';
+    if(code.indexOf('wrong-password')>=0||code.indexOf('invalid-credential')>=0) return 'Incorrect email or password.';
+    if(code.indexOf('user-not-found')>=0) return 'No account with that email — try "Create account" instead.';
+    if(code.indexOf('email-already-in-use')>=0) return 'An account already exists with that email — try signing in instead.';
+    if(code.indexOf('weak-password')>=0) return 'Password must be at least 6 characters.';
+    if(code.indexOf('invalid-email')>=0) return 'That doesn\'t look like a valid email address.';
+    if(code.indexOf('network-request-failed')>=0) return 'Network error — check your connection and try again.';
+    return (e&&e.message)||'Something went wrong. Try again.';
+  }
+  document.getElementById('btnCloudSignIn').addEventListener('click',function(){
+    var email=document.getElementById('cloudSyncEmail').value.trim();
+    var pw=document.getElementById('cloudSyncPassword').value;
+    var errEl=document.getElementById('cloudSyncError');
+    errEl.textContent='';
+    if(!window.TradSync || !window.TradSync.ready){ errEl.textContent='Cloud sync isn\'t available right now (offline or blocked).'; return; }
+    if(!email||!pw){ errEl.textContent='Enter your email and password.'; return; }
+    window.TradSync.signIn(email,pw).then(function(){
+      document.getElementById('cloudSyncPassword').value='';
+    }).catch(function(e){ errEl.textContent=cloudSyncErrorMessage(e); });
+  });
+  document.getElementById('btnCloudSignUp').addEventListener('click',function(){
+    var email=document.getElementById('cloudSyncEmail').value.trim();
+    var pw=document.getElementById('cloudSyncPassword').value;
+    var errEl=document.getElementById('cloudSyncError');
+    errEl.textContent='';
+    if(!window.TradSync || !window.TradSync.ready){ errEl.textContent='Cloud sync isn\'t available right now (offline or blocked).'; return; }
+    if(!email||!pw){ errEl.textContent='Enter an email and a password (6+ characters).'; return; }
+    window.TradSync.signUp(email,pw).then(function(){
+      document.getElementById('cloudSyncPassword').value='';
+    }).catch(function(e){ errEl.textContent=cloudSyncErrorMessage(e); });
+  });
+  document.getElementById('btnCloudSignOut').addEventListener('click',function(){
+    if(window.TradSync && window.TradSync.signOutUser) window.TradSync.signOutUser();
+  });
+  function waitForTradSync(cb){
+    if(window.TradSync){ cb(); return; }
+    var waited=0;
+    var iv=setInterval(function(){
+      waited+=150;
+      if(window.TradSync){ clearInterval(iv); cb(); }
+      else if(waited>=10000){ clearInterval(iv); window.TradSync={ready:false,user:null,onAuthChange:function(cb2){cb2(null);}}; cb(); }
+    },150);
+  }
+
   // ---- browsable trash (Settings) — the Undo toast covers the in-the-moment case; this covers
   // "I deleted something days ago and want it back", up to TRASH_RETENTION_DAYS ----
   function renderTrashList(){
@@ -5575,6 +6739,7 @@
         state.trash=(state.trash||[]).filter(function(x){ return x!==item; });
         state.days[item.date]=state.days[item.date]||[];
         state.days[item.date].push(item.trade);
+        queueDaySync(item.date);
         saveData().then(function(){ renderAll(); renderTrashList(); });
       });
     });
@@ -6036,6 +7201,7 @@
   loadData(function(){
     ensureLayouts();
     ensureRules();
+    ensureBacktest();
     ensureCoachSessions();
     applyTheme();
     var loader=document.getElementById('appLoader');
@@ -6048,6 +7214,12 @@
     checkBackupNag();
     refreshStorageQuoteLine();
     if(hasAppLock()) showLockScreen(); else armIdleLockTimer();
+    waitForTradSync(function(){
+      window.TradSync.onAuthChange(function(user){
+        renderCloudSyncStatus();
+        if(user) pullAndMergeCloudData();
+      });
+    });
   });
 })();
 </script>
